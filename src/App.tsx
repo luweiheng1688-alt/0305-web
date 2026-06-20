@@ -2,65 +2,65 @@ import { useEffect, useState } from 'react'
 import { supabase } from './supabaseClient'
 import type { User } from '@supabase/supabase-js'
 
-type StatusPost = {
-  id: string
-  author_id: string
-  text: string | null
-  mood: string | null
-  echo_count: number | null
-  created_at: string
-}
-
-type SpaceComment = {
-  id: string
-  space_id: string
-  author_id: string
-  author_code: string | null
-  text: string | null
-  image_data: string | null
-  image_mime_type: string | null
-  created_at: string
-}
-
 type Profile = {
   id: string
   email: string
   planet_code: string
 }
 
+type Space = {
+  id: string
+  owner_id: string
+  title: string
+  theme_kind: string | null
+  artist_name: string | null
+  song_title: string | null
+  lyric_line: string | null
+  lyric_translation: string | null
+  loop_count: number | null
+  progress: number | null
+  mood: string | null
+  topic: string | null
+  is_live: boolean | null
+  listeners: number | null
+  created_at: string
+}
+
+type SpaceMessage = {
+  id: string
+  space_id: string
+  sender_id: string | null
+  sender_code: string | null
+  kind: string
+  text: string
+  created_at: string
+}
+
 function App() {
   const [user, setUser] = useState<User | null>(null)
   const [profile, setProfile] = useState<Profile | null>(null)
 
-  const [posts, setPosts] = useState<StatusPost[]>([])
-  const [loadingPosts, setLoadingPosts] = useState(false)
-
-  const [comments, setComments] = useState<SpaceComment[]>([])
-  const [loadingComments, setLoadingComments] = useState(false)
-
-  const [spaceId, setSpaceId] = useState<string | null>(null)
+  const [spaces, setSpaces] = useState<Space[]>([])
+  const [selectedSpace, setSelectedSpace] = useState<Space | null>(null)
+  const [messages, setMessages] = useState<SpaceMessage[]>([])
 
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [inviteCode, setInviteCode] = useState('')
+  const [draft, setDraft] = useState('')
   const [message, setMessage] = useState('')
 
-  const [newPostText, setNewPostText] = useState('')
-  const [newPostMood, setNewPostMood] = useState('')
-  const [posting, setPosting] = useState(false)
-
-  const [newCommentText, setNewCommentText] = useState('')
-  const [commenting, setCommenting] = useState(false)
+  const [isTextMode, setIsTextMode] = useState(true)
+  const [isShowingDetail, setIsShowingDetail] = useState(false)
+  const [sending, setSending] = useState(false)
 
   useEffect(() => {
     supabase.auth.getUser().then(async ({ data }) => {
       setUser(data.user)
 
       if (data.user) {
-        await loadMyProfile(data.user.id)
-        await loadFirstSpace()
-        await loadStatusPosts()
-        await loadSpaceComments()
+        await loadProfile(data.user.id)
+        await loadSpaces()
       }
     })
 
@@ -68,55 +68,46 @@ function App() {
       setUser(session?.user ?? null)
 
       if (session?.user) {
-        await loadMyProfile(session.user.id)
-        await loadFirstSpace()
-        await loadStatusPosts()
-        await loadSpaceComments()
+        await loadProfile(session.user.id)
+        await loadSpaces()
       } else {
         setProfile(null)
-        setPosts([])
-        setComments([])
+        setSpaces([])
+        setSelectedSpace(null)
+        setMessages([])
       }
     })
 
-    const postsChannel = supabase
-      .channel('status_posts_changes')
+    const spacesChannel = supabase
+      .channel('spaces_changes')
       .on(
         'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'status_posts',
-        },
-        () => {
-          loadStatusPosts()
-        }
+        { event: '*', schema: 'public', table: 'spaces' },
+        () => loadSpaces()
       )
       .subscribe()
 
-    const commentsChannel = supabase
-      .channel('space_comments_changes')
+    const messagesChannel = supabase
+      .channel('space_messages_changes')
       .on(
         'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'space_comments',
-        },
+        { event: '*', schema: 'public', table: 'space_messages' },
         () => {
-          loadSpaceComments()
+          if (selectedSpace) {
+            loadSpaceMessages(selectedSpace.id)
+          }
         }
       )
       .subscribe()
 
     return () => {
       listener.subscription.unsubscribe()
-      supabase.removeChannel(postsChannel)
-      supabase.removeChannel(commentsChannel)
+      supabase.removeChannel(spacesChannel)
+      supabase.removeChannel(messagesChannel)
     }
-  }, [])
+  }, [selectedSpace?.id])
 
-  async function loadMyProfile(userId: string) {
+  async function loadProfile(userId: string) {
     const { data, error } = await supabase
       .from('profiles')
       .select('id, email, planet_code')
@@ -131,55 +122,107 @@ function App() {
     setProfile(data)
   }
 
-  async function loadFirstSpace() {
+  async function loadSpaces() {
     const { data, error } = await supabase
       .from('spaces')
-      .select('id')
-      .limit(1)
-      .single()
+      .select('id, owner_id, title, theme_kind, artist_name, song_title, lyric_line, lyric_translation, loop_count, progress, mood, topic, is_live, listeners, created_at')
+      .order('created_at', { ascending: true })
 
     if (error) {
-      setMessage(`读取空间失败：${error.message}`)
+      setMessage(`读取时空失败：${error.message}`)
       return
     }
 
-    setSpaceId(data.id)
+    setSpaces(data ?? [])
   }
 
-  async function loadStatusPosts() {
-    setLoadingPosts(true)
-
+  async function loadSpaceMessages(spaceId: string) {
     const { data, error } = await supabase
-      .from('status_posts')
-      .select('id, author_id, text, mood, echo_count, created_at')
-      .order('created_at', { ascending: false })
-
-    setLoadingPosts(false)
+      .from('space_messages')
+      .select('id, space_id, sender_id, sender_code, kind, text, created_at')
+      .eq('space_id', spaceId)
+      .order('created_at', { ascending: true })
 
     if (error) {
-      setMessage(error.message)
+      setMessage(`读取消息失败：${error.message}`)
       return
     }
 
-    setPosts(data ?? [])
+    setMessages(data ?? [])
   }
 
-  async function loadSpaceComments() {
-    setLoadingComments(true)
+  async function openSpace(space: Space) {
+    setSelectedSpace(space)
+    setIsShowingDetail(false)
+    await loadSpaceMessages(space.id)
+  }
 
-    const { data, error } = await supabase
-      .from('space_comments')
-      .select('id, space_id, author_id, author_code, text, image_data, image_mime_type, created_at')
-      .order('created_at', { ascending: false })
+  async function sendTextMessage() {
+    setMessage('')
 
-    setLoadingComments(false)
-
-    if (error) {
-      setMessage(error.message)
+    if (!user) {
+      setMessage('请先登录')
       return
     }
 
-    setComments(data ?? [])
+    if (!profile) {
+      setMessage('用户资料未加载，请刷新后再试')
+      return
+    }
+
+    if (!selectedSpace) {
+      setMessage('请先进入一个时空')
+      return
+    }
+
+    const text = draft.trim()
+
+    if (!text) {
+      return
+    }
+
+    setSending(true)
+
+    const { error } = await supabase
+      .from('space_messages')
+      .insert({
+        space_id: selectedSpace.id,
+        sender_id: user.id,
+        sender_code: profile.planet_code,
+        kind: 'user',
+        text,
+      })
+
+    setSending(false)
+
+    if (error) {
+      setMessage(`发送失败：${error.message}`)
+      return
+    }
+
+    setDraft('')
+    await loadSpaceMessages(selectedSpace.id)
+  }
+
+  async function sendEmojiEvent() {
+    if (!user || !profile || !selectedSpace) return
+
+    const { error } = await supabase
+      .from('space_messages')
+      .insert({
+        space_id: selectedSpace.id,
+        sender_id: user.id,
+        sender_code: profile.planet_code,
+        kind: 'system',
+        text: '欢迎欢迎👏',
+      })
+
+    if (error) {
+      setMessage(`发送失败：${error.message}`)
+      return
+    }
+
+    await loadSpaceMessages(selectedSpace.id)
   }
 
   async function signUp() {
@@ -201,7 +244,7 @@ function App() {
     }
 
     if (!data.user) {
-      setMessage('注册成功，请先去邮箱验证，然后回来登录。')
+      setMessage('注册成功，请先验证邮箱后登录')
       return
     }
 
@@ -215,20 +258,15 @@ function App() {
     }
 
     if (!ok) {
-      setMessage('邀请码无效或已经被使用。')
+      setMessage('邀请码无效或已经被使用')
       return
     }
 
-    setMessage('注册成功，邀请码已使用。')
+    setMessage('注册成功，邀请码已使用')
   }
 
   async function signIn() {
     setMessage('')
-
-    if (!email || !password) {
-      setMessage('请填写邮箱和密码')
-      return
-    }
 
     const { error } = await supabase.auth.signInWithPassword({
       email,
@@ -245,228 +283,39 @@ function App() {
 
   async function signOut() {
     await supabase.auth.signOut()
-    setProfile(null)
-    setPosts([])
-    setComments([])
-    setMessage('已退出登录')
   }
 
-  async function createStatusPost() {
-    setMessage('')
-
-    if (!user) {
-      setMessage('请先登录后再发布')
-      return
-    }
-
-    if (!newPostText.trim()) {
-      setMessage('请输入动态内容')
-      return
-    }
-
-    setPosting(true)
-
-    const { error } = await supabase
-      .from('status_posts')
-      .insert({
-        author_id: user.id,
-        text: newPostText.trim(),
-        mood: newPostMood.trim() || '平静',
-        echo_count: 0,
-      })
-
-    setPosting(false)
-
-    if (error) {
-      setMessage(`发布失败：${error.message}`)
-      return
-    }
-
-    setNewPostText('')
-    setNewPostMood('')
-    setMessage('发布成功')
-    await loadStatusPosts()
-  }
-
-  async function echoStatusPost(post: StatusPost) {
-    setMessage('')
-
-    const nextEchoCount = (post.echo_count ?? 0) + 1
-
-    const { error } = await supabase
-      .from('status_posts')
-      .update({
-        echo_count: nextEchoCount,
-      })
-      .eq('id', post.id)
-
-    if (error) {
-      setMessage(`回响失败：${error.message}`)
-      return
-    }
-
-    await loadStatusPosts()
-  }
-
-  async function createSpaceComment() {
-    setMessage('')
-
-    if (!user) {
-      setMessage('请先登录后再留言')
-      return
-    }
-
-    if (!profile) {
-      setMessage('用户资料还没加载好，请刷新后再试')
-      return
-    }
-
-    if (!spaceId) {
-      setMessage('空间还没加载好，请刷新后再试')
-      return
-    }
-
-    if (!newCommentText.trim()) {
-      setMessage('请输入留言内容')
-      return
-    }
-
-    setCommenting(true)
-
-    const { error } = await supabase
-      .from('space_comments')
-      .insert({
-        space_id: spaceId,
-        author_id: user.id,
-        author_code: profile.planet_code,
-        text: newCommentText.trim(),
-        image_data: null,
-        image_mime_type: null,
-      })
-
-    setCommenting(false)
-
-    if (error) {
-      setMessage(`留言失败：${error.message}`)
-      return
-    }
-
-    setNewCommentText('')
-    setMessage('留言成功')
-    await loadSpaceComments()
-  }
-
-  if (user) {
+  if (!user) {
     return (
-      <div style={styles.page}>
-        <div style={styles.card}>
-          <h1>0305</h1>
-          <p>你已登录：{user.email}</p>
-          {profile && <p style={styles.smallText}>你的星球编号：{profile.planet_code}</p>}
+      <div style={styles.loginPage}>
+        <div style={styles.loginCard}>
+          <h1 style={styles.loginTitle}>0305</h1>
+          <p style={styles.loginSub}>进入我们的星球</p>
 
-          <textarea
-            style={styles.textarea}
-            placeholder="写点什么..."
-            value={newPostText}
-            onChange={(e) => setNewPostText(e.target.value)}
+          <input
+            style={styles.loginInput}
+            placeholder="邮箱"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
           />
 
           <input
-            style={styles.input}
-            placeholder="心情，比如 开心 / 想你 / 累了"
-            value={newPostMood}
-            onChange={(e) => setNewPostMood(e.target.value)}
+            style={styles.loginInput}
+            placeholder="密码"
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
           />
 
-          <button
-            style={styles.button}
-            onClick={createStatusPost}
-            disabled={posting}
-          >
-            {posting ? '发布中...' : '发布动态'}
-          </button>
-
-          <button style={styles.button} onClick={loadStatusPosts}>
-            刷新动态
-          </button>
-
-          <h2 style={styles.sectionTitle}>动态</h2>
-
-          {loadingPosts && <p>正在加载...</p>}
-
-          {!loadingPosts && posts.length === 0 && (
-            <p style={styles.emptyText}>还没有动态</p>
-          )}
-
-          {!loadingPosts && posts.map((post) => (
-            <div key={post.id} style={styles.postCard}>
-              <p style={styles.postText}>{post.text || '无内容'}</p>
-
-              {post.mood && (
-                <p style={styles.postMeta}>心情：{post.mood}</p>
-              )}
-
-              <div style={styles.echoRow}>
-                <span style={styles.postMeta}>
-                  回响：{post.echo_count ?? 0}
-                </span>
-
-                <button
-                  style={styles.echoButton}
-                  onClick={() => echoStatusPost(post)}
-                >
-                  回响 +1
-                </button>
-              </div>
-
-              <p style={styles.postDate}>
-                {new Date(post.created_at).toLocaleString()}
-              </p>
-            </div>
-          ))}
-
-          <h2 style={styles.sectionTitle}>空间留言</h2>
-
-          <textarea
-            style={styles.textarea}
-            placeholder="留下一句话..."
-            value={newCommentText}
-            onChange={(e) => setNewCommentText(e.target.value)}
+          <input
+            style={styles.loginInput}
+            placeholder="邀请码"
+            value={inviteCode}
+            onChange={(e) => setInviteCode(e.target.value)}
           />
 
-          <button
-            style={styles.button}
-            onClick={createSpaceComment}
-            disabled={commenting}
-          >
-            {commenting ? '留言中...' : '发布留言'}
-          </button>
-
-          <button style={styles.button} onClick={loadSpaceComments}>
-            刷新留言
-          </button>
-
-          {loadingComments && <p>正在加载留言...</p>}
-
-          {!loadingComments && comments.length === 0 && (
-            <p style={styles.emptyText}>还没有留言</p>
-          )}
-
-          {!loadingComments && comments.map((comment) => (
-            <div key={comment.id} style={styles.commentCard}>
-              <p style={styles.commentAuthor}>
-                {comment.author_code || '未知用户'}
-              </p>
-              <p style={styles.postText}>{comment.text || '无内容'}</p>
-              <p style={styles.postDate}>
-                {new Date(comment.created_at).toLocaleString()}
-              </p>
-            </div>
-          ))}
-
-          <button style={styles.secondaryButton} onClick={signOut}>
-            退出登录
-          </button>
+          <button style={styles.blackButton} onClick={signUp}>注册</button>
+          <button style={styles.whiteButton} onClick={signIn}>登录</button>
 
           {message && <p style={styles.message}>{message}</p>}
         </div>
@@ -474,174 +323,606 @@ function App() {
     )
   }
 
+  if (selectedSpace && isShowingDetail) {
+    return (
+      <div style={styles.page}>
+        <div style={styles.detailTop}>
+          <button style={styles.backIcon} onClick={() => setIsShowingDetail(false)}>‹</button>
+        </div>
+
+        <main style={styles.detailMain}>
+          <h1 style={styles.detailTitle}>{selectedSpace.title}</h1>
+
+          <div style={styles.ownerRow}>
+            <div style={styles.bigAvatar}>
+              {(selectedSpace.artist_name || profile?.planet_code || '??').slice(0, 2)}
+            </div>
+
+            <div>
+              <div style={styles.ownerName}>
+                {selectedSpace.artist_name || '未知用户'}
+                {selectedSpace.owner_id === user.id && (
+                  <span style={styles.ownerBadge}>时空主人</span>
+                )}
+              </div>
+
+              <div style={styles.createdText}>
+                创建于：{formatDate(selectedSpace.created_at)}
+              </div>
+            </div>
+          </div>
+
+          <div style={styles.topicBlock}>
+            <div style={styles.topicLine}></div>
+            <p style={styles.topicText}>
+              TA说： {selectedSpace.topic || selectedSpace.lyric_line || selectedSpace.title}
+            </p>
+          </div>
+        </main>
+
+        <section style={styles.detailList}>
+          <div style={styles.listRow}>
+            <span style={styles.listIcon}>☺</span>
+            <span style={styles.listTitle}>累计来过</span>
+            <span style={styles.listValue}>{selectedSpace.listeners ?? 0}</span>
+            <span style={styles.arrow}>›</span>
+          </div>
+
+          <div style={styles.listRow}>
+            <span style={styles.heart}>♥</span>
+            <span style={styles.listTitle}>喜欢这个时空</span>
+            <span style={styles.listValue}>0</span>
+            <span style={styles.arrow}>›</span>
+          </div>
+
+          <div style={styles.listRow}>
+            <span style={styles.listIcon}>✎</span>
+            <span style={styles.listTitle}>留言板</span>
+            <span style={styles.listValue}>0</span>
+            <span style={styles.arrow}>›</span>
+          </div>
+        </section>
+      </div>
+    )
+  }
+
+  if (selectedSpace) {
+    return (
+      <div style={styles.roomPage}>
+        <header style={styles.roomHeader}>
+          <div style={styles.roomTitleRow}>
+            <h1 style={styles.roomTitle}>{selectedSpace.title}</h1>
+
+            <div style={styles.roomActions}>
+              <button style={styles.roomIconButton} onClick={() => setSelectedSpace(null)}>↘</button>
+              <button style={styles.roomIconButton} onClick={() => setIsShowingDetail(true)}>•••</button>
+            </div>
+          </div>
+
+          <div style={styles.memberRow}>
+            <div style={styles.smallAvatar}>
+              {(selectedSpace.artist_name || profile?.planet_code || '??').slice(0, 2)}
+            </div>
+
+            <div style={styles.memberSpacer}></div>
+
+            <div style={styles.peoplePill}>
+              此刻{selectedSpace.listeners ?? 0}人
+            </div>
+          </div>
+        </header>
+
+        <div style={styles.divider}></div>
+
+        <main style={styles.messageStream}>
+          {messages.map((item) => {
+            if (item.kind === 'system') {
+              return (
+                <div key={item.id} style={styles.systemMessage}>
+                  <div>{item.text}</div>
+                  <div style={styles.timeText}>{formatTime(item.created_at)}</div>
+                </div>
+              )
+            }
+
+            return (
+              <div key={item.id} style={styles.userMessage}>
+                {item.sender_code && (
+                  <div style={styles.senderCode}>{item.sender_code}</div>
+                )}
+                <div style={styles.messageText}>{item.text}</div>
+              </div>
+            )
+          })}
+
+          {messages.length === 0 && (
+            <div style={styles.emptyRoom}>这里还没有人说话</div>
+          )}
+
+          {message && <p style={styles.message}>{message}</p>}
+        </main>
+
+        <footer style={styles.inputBar}>
+          <button style={styles.emojiButton} onClick={sendEmojiEvent}>☺</button>
+
+          {isTextMode ? (
+            <input
+              style={styles.chatInput}
+              placeholder="一起说会儿话吧..."
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  sendTextMessage()
+                }
+              }}
+            />
+          ) : (
+            <button style={styles.voiceButton}>按住说话</button>
+          )}
+
+          <button style={styles.roundButton} onClick={() => setIsTextMode(!isTextMode)}>
+            {isTextMode ? '🎙' : '⌨'}
+          </button>
+
+          <button style={styles.roundButton}>▧</button>
+
+          {isTextMode && (
+            <button style={styles.sendMiniButton} onClick={sendTextMessage} disabled={sending}>
+              发
+            </button>
+          )}
+        </footer>
+      </div>
+    )
+  }
+
   return (
     <div style={styles.page}>
-      <div style={styles.card}>
-        <h1>0305</h1>
-        <p>请登录或注册</p>
+      <header style={styles.homeHeader}>
+        <button style={styles.homeIcon}>♙</button>
 
-        <input
-          style={styles.input}
-          placeholder="邮箱"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-        />
+        <div style={styles.homeRight}>
+          <button style={styles.searchIcon}>⌕</button>
+          <button style={styles.profileCircle}></button>
+        </div>
+      </header>
 
-        <input
-          style={styles.input}
-          placeholder="密码"
-          type="password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-        />
+      <main style={styles.grid}>
+        {spaces.map((space) => (
+          <button
+            key={space.id}
+            style={styles.spaceCell}
+            onClick={() => openSpace(space)}
+          >
+            <div style={styles.spaceTitle}>{space.title}</div>
+            <div style={styles.spaceSub}>此刻{space.listeners ?? 0}人</div>
+          </button>
+        ))}
 
-        <input
-          style={styles.input}
-          placeholder="邀请码"
-          value={inviteCode}
-          onChange={(e) => setInviteCode(e.target.value)}
-        />
+        <button style={styles.addCell}>＋</button>
+      </main>
 
-        <button style={styles.button} onClick={signUp}>
-          注册
-        </button>
+      <button style={styles.logoutButton} onClick={signOut}>
+        退出登录
+      </button>
 
-        <button style={styles.secondaryButton} onClick={signIn}>
-          登录
-        </button>
-
-        {message && <p style={styles.message}>{message}</p>}
-      </div>
+      {message && <p style={styles.message}>{message}</p>}
     </div>
   )
+}
+
+function formatDate(value: string) {
+  const date = new Date(value)
+  return `${String(date.getMonth() + 1).padStart(2, '0')}月${String(date.getDate()).padStart(2, '0')}日 ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+}
+
+function formatTime(value: string) {
+  const date = new Date(value)
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
 }
 
 const styles: Record<string, React.CSSProperties> = {
   page: {
     minHeight: '100vh',
-    background: '#fff7f7',
+    background: '#fff',
+    color: '#3f3f46',
+    fontFamily: '-apple-system, BlinkMacSystemFont, sans-serif',
+  },
+  loginPage: {
+    minHeight: '100vh',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
+    background: '#fff',
     fontFamily: '-apple-system, BlinkMacSystemFont, sans-serif',
-    padding: 16,
-  },
-  card: {
-    width: '100%',
-    maxWidth: 420,
-    background: 'white',
-    borderRadius: 24,
     padding: 24,
-    boxShadow: '0 10px 30px rgba(0,0,0,0.08)',
-    textAlign: 'center',
   },
-  sectionTitle: {
-    marginTop: 28,
-    marginBottom: 12,
-    fontSize: 20,
-  },
-  emptyText: {
-    color: '#999',
-  },
-  smallText: {
-    fontSize: 13,
-    color: '#999',
-  },
-  postCard: {
-    textAlign: 'left',
-    background: '#fff7f7',
-    borderRadius: 16,
-    padding: 14,
-    marginBottom: 12,
-  },
-  commentCard: {
-    textAlign: 'left',
-    background: '#f8f8ff',
-    borderRadius: 16,
-    padding: 14,
-    marginBottom: 12,
-  },
-  commentAuthor: {
-    fontSize: 13,
-    color: '#ff6b81',
-    margin: '0 0 6px',
-    fontWeight: 700,
-  },
-  postText: {
-    fontSize: 16,
-    margin: '0 0 8px',
-  },
-  postMeta: {
-    fontSize: 13,
-    color: '#666',
-    margin: '4px 0',
-  },
-  postDate: {
-    fontSize: 12,
-    color: '#999',
-    margin: '8px 0 0',
-  },
-  input: {
+  loginCard: {
     width: '100%',
+    maxWidth: 360,
+  },
+  loginTitle: {
+    fontSize: 56,
+    margin: 0,
+    color: '#333',
+  },
+  loginSub: {
+    color: '#999',
+    marginBottom: 28,
+  },
+  loginInput: {
+    width: '100%',
+    height: 52,
     boxSizing: 'border-box',
-    padding: 14,
-    marginBottom: 12,
-    borderRadius: 12,
-    border: '1px solid #ddd',
+    border: '1px solid #eee',
+    background: '#fafafa',
+    borderRadius: 16,
+    padding: '0 16px',
     fontSize: 16,
-  },
-  textarea: {
-    width: '100%',
-    boxSizing: 'border-box',
-    padding: 14,
     marginBottom: 12,
-    borderRadius: 12,
-    border: '1px solid #ddd',
-    fontSize: 16,
-    minHeight: 90,
-    resize: 'vertical',
-    fontFamily: '-apple-system, BlinkMacSystemFont, sans-serif',
   },
-  button: {
+  blackButton: {
     width: '100%',
-    padding: 14,
-    borderRadius: 12,
+    height: 52,
     border: 'none',
-    background: '#ff6b81',
-    color: 'white',
+    borderRadius: 16,
+    background: '#333',
+    color: '#fff',
     fontSize: 16,
-    marginBottom: 12,
+    marginTop: 8,
   },
-  secondaryButton: {
+  whiteButton: {
     width: '100%',
-    padding: 14,
-    borderRadius: 12,
-    border: '1px solid #ff6b81',
-    background: 'white',
-    color: '#ff6b81',
+    height: 52,
+    border: '1px solid #eee',
+    borderRadius: 16,
+    background: '#fff',
+    color: '#333',
     fontSize: 16,
     marginTop: 12,
   },
-  echoRow: {
+  homeHeader: {
+    height: 122,
+    display: 'flex',
+    alignItems: 'flex-end',
+    justifyContent: 'space-between',
+    padding: '0 42px 28px',
+    boxSizing: 'border-box',
+  },
+  homeIcon: {
+    border: 'none',
+    background: 'transparent',
+    fontSize: 34,
+    color: '#3f3f46',
+  },
+  homeRight: {
     display: 'flex',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    gap: 30,
+  },
+  searchIcon: {
+    border: 'none',
+    background: 'transparent',
+    fontSize: 48,
+    lineHeight: 1,
+    color: '#3f3f46',
+  },
+  profileCircle: {
+    width: 52,
+    height: 52,
+    borderRadius: '50%',
+    border: '4px solid #555',
+    background: '#fff',
+  },
+  grid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(3, 1fr)',
+    borderTop: '1px solid #eee',
+    borderLeft: '1px solid #eee',
+  },
+  spaceCell: {
+    height: 150,
+    border: 'none',
+    borderRight: '1px solid #eee',
+    borderBottom: '1px solid #eee',
+    background: '#fff',
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  spaceTitle: {
+    fontSize: 15,
+    color: '#3f3f46',
+    marginBottom: 8,
+  },
+  spaceSub: {
+    fontSize: 13,
+    color: '#aaa',
+  },
+  addCell: {
+    height: 150,
+    border: 'none',
+    borderRight: '1px solid #eee',
+    borderBottom: '1px solid #eee',
+    background: '#fff',
+    fontSize: 42,
+    color: '#444',
+  },
+  logoutButton: {
+    position: 'fixed',
+    right: 16,
+    bottom: 16,
+    background: '#fff',
+    border: '1px solid #eee',
+    borderRadius: 999,
+    padding: '8px 14px',
+    color: '#999',
+  },
+  roomPage: {
+    minHeight: '100vh',
+    background: '#fff',
+    display: 'flex',
+    flexDirection: 'column',
+    color: '#3f3f46',
+    fontFamily: '-apple-system, BlinkMacSystemFont, sans-serif',
+  },
+  roomHeader: {
+    padding: '22px 20px 14px',
+  },
+  roomTitleRow: {
+    display: 'flex',
+    alignItems: 'center',
     gap: 12,
+  },
+  roomTitle: {
+    fontSize: 36,
+    fontWeight: 400,
+    margin: 0,
+    flex: 1,
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
+  roomActions: {
+    display: 'flex',
+    gap: 8,
+  },
+  roomIconButton: {
+    width: 44,
+    height: 44,
+    border: 'none',
+    background: 'transparent',
+    fontSize: 24,
+    color: '#3f3f46',
+  },
+  memberRow: {
+    display: 'flex',
+    alignItems: 'center',
+    marginTop: 28,
+  },
+  smallAvatar: {
+    width: 44,
+    height: 44,
+    borderRadius: '50%',
+    border: '1px solid #eee',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    color: '#777',
+    background: '#fff',
+  },
+  memberSpacer: {
+    flex: 1,
+  },
+  peoplePill: {
+    padding: '13px 24px',
+    borderRadius: 999,
+    background: '#f3f3f3',
+    color: '#777',
+    fontSize: 18,
+  },
+  divider: {
+    height: 1,
+    background: '#eee',
+  },
+  messageStream: {
+    flex: 1,
+    padding: '36px 20px 120px',
+    overflowY: 'auto',
+  },
+  systemMessage: {
+    textAlign: 'center',
+    color: '#aaa',
+    fontSize: 18,
+    marginBottom: 28,
+  },
+  timeText: {
+    fontSize: 13,
+    marginTop: 8,
+    color: '#bbb',
+  },
+  userMessage: {
+    textAlign: 'center',
+    marginBottom: 28,
+  },
+  senderCode: {
+    color: '#aaa',
+    fontSize: 14,
+    marginBottom: 8,
+  },
+  messageText: {
+    color: '#999',
+    fontSize: 18,
+    lineHeight: 1.5,
+  },
+  emptyRoom: {
+    textAlign: 'center',
+    color: '#aaa',
+    marginTop: 80,
+  },
+  inputBar: {
+    position: 'fixed',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    background: '#fff',
+    display: 'flex',
+    alignItems: 'center',
+    gap: 12,
+    padding: '12px 18px 22px',
+    boxSizing: 'border-box',
+  },
+  emojiButton: {
+    width: 52,
+    height: 52,
+    borderRadius: '50%',
+    border: '3px solid #555',
+    background: '#fff',
+    fontSize: 24,
+  },
+  chatInput: {
+    flex: 1,
+    height: 54,
+    border: 'none',
+    borderRadius: 999,
+    background: '#f4f4f4',
+    padding: '0 20px',
+    fontSize: 16,
+    minWidth: 0,
+  },
+  voiceButton: {
+    flex: 1,
+    height: 54,
+    border: 'none',
+    borderRadius: 999,
+    background: '#f4f4f4',
+    color: '#aaa',
+    fontSize: 18,
+  },
+  roundButton: {
+    width: 52,
+    height: 52,
+    borderRadius: '50%',
+    border: '2px solid #ddd',
+    background: '#fff',
+    fontSize: 20,
+  },
+  sendMiniButton: {
+    width: 44,
+    height: 44,
+    borderRadius: '50%',
+    border: 'none',
+    background: '#333',
+    color: '#fff',
+  },
+  detailTop: {
+    height: 96,
+    display: 'flex',
+    alignItems: 'flex-end',
+    paddingLeft: 34,
+  },
+  backIcon: {
+    border: 'none',
+    background: 'transparent',
+    fontSize: 72,
+    color: '#3f3f46',
+  },
+  detailMain: {
+    padding: '34px 44px 70px',
+  },
+  detailTitle: {
+    fontSize: 56,
+    fontWeight: 400,
+    margin: '0 0 54px',
+    color: '#3f3f46',
+  },
+  ownerRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 22,
+    marginBottom: 48,
+  },
+  bigAvatar: {
+    width: 88,
+    height: 88,
+    borderRadius: '50%',
+    background: '#ead796',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    color: '#fff',
+    fontSize: 28,
+    fontWeight: 700,
+  },
+  ownerName: {
+    fontSize: 26,
+    color: '#999',
+  },
+  ownerBadge: {
+    fontSize: 16,
+    border: '1px solid #aaa',
+    borderRadius: 6,
+    padding: '4px 8px',
+    marginLeft: 12,
+  },
+  createdText: {
+    fontSize: 20,
+    color: '#aaa',
     marginTop: 8,
   },
-  echoButton: {
-    padding: '8px 12px',
-    borderRadius: 999,
-    border: '1px solid #ff6b81',
-    background: 'white',
-    color: '#ff6b81',
-    fontSize: 13,
+  topicBlock: {
+    display: 'flex',
+    gap: 24,
+  },
+  topicLine: {
+    width: 8,
+    background: '#f1f1f1',
+  },
+  topicText: {
+    fontSize: 30,
+    color: '#aaa',
+    lineHeight: 1.5,
+    margin: 0,
+  },
+  detailList: {
+    borderTop: '12px solid #f7f7f7',
+  },
+  listRow: {
+    height: 92,
+    display: 'grid',
+    gridTemplateColumns: '56px 1fr 50px 28px',
+    alignItems: 'center',
+    padding: '0 44px',
+    borderBottom: '1px solid #f2f2f2',
+  },
+  listIcon: {
+    fontSize: 30,
+    color: '#666',
+  },
+  heart: {
+    fontSize: 34,
+    color: '#28c29d',
+  },
+  listTitle: {
+    fontSize: 30,
+    color: '#3f3f46',
+  },
+  listValue: {
+    fontSize: 24,
+    color: '#aaa',
+    textAlign: 'right',
+  },
+  arrow: {
+    fontSize: 42,
+    color: '#aaa',
+    textAlign: 'right',
   },
   message: {
-    fontSize: 14,
-    color: '#ff6b81',
-    marginTop: 8,
-    marginBottom: 12,
+    color: '#d44',
+    textAlign: 'center',
+    padding: 12,
   },
 }
 
