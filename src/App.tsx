@@ -114,6 +114,26 @@ function App() {
   await loadStatusPosts()
 }
 
+async function echoStatusPost(post: StatusPost) {
+  setMessage('')
+
+  const nextEchoCount = (post.echo_count ?? 0) + 1
+
+  const { error } = await supabase
+    .from('status_posts')
+    .update({
+      echo_count: nextEchoCount,
+    })
+    .eq('id', post.id)
+
+  if (error) {
+    setMessage(`回响失败：${error.message}`)
+    return
+  }
+
+  await loadStatusPosts()
+}
+
   async function signUp() {
     setMessage('')
 
@@ -225,9 +245,18 @@ function App() {
                 <p style={styles.postMeta}>心情：{post.mood}</p>
               )}
 
-              <p style={styles.postMeta}>
-                回响：{post.echo_count ?? 0}
-              </p>
+              <div style={styles.echoRow}>
+  <span style={styles.postMeta}>
+    回响：{post.echo_count ?? 0}
+  </span>
+
+  <button
+    style={styles.echoButton}
+    onClick={() => echoStatusPost(post)}
+  >
+    回响 +1
+  </button>
+</div>
 
               <p style={styles.postDate}>
                 {new Date(post.created_at).toLocaleString()}
@@ -297,6 +326,21 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: '-apple-system, BlinkMacSystemFont, sans-serif',
     padding: 16,
   },
+  echoRow: {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: 12,
+  marginTop: 8,
+},
+echoButton: {
+  padding: '8px 12px',
+  borderRadius: 999,
+  border: '1px solid #ff6b81',
+  background: 'white',
+  color: '#ff6b81',
+  fontSize: 13,
+},
   card: {
     width: '100%',
     maxWidth: 420,
