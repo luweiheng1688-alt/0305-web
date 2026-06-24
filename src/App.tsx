@@ -1,28 +1,41 @@
-import { useEffect, useState } from 'react'
-import { supabase } from './supabaseClient'
 import type { User } from '@supabase/supabase-js'
+import {
+  startTransition,
+  useDeferredValue,
+  useEffect,
+  useEffectEvent,
+  useMemo,
+  useState,
+} from 'react'
+import type { ReactNode } from 'react'
+import './App.css'
+import { supabase } from './supabaseClient'
 
 type Profile = {
   id: string
   email: string
   planet_code: string
+  avatar_seed: string
+  position_description: string
+  tagline: string
+  created_at: string
 }
 
 type Space = {
   id: string
   owner_id: string
   title: string
-  theme_kind: string | null
-  artist_name: string | null
-  song_title: string | null
-  lyric_line: string | null
+  theme_kind: string
+  artist_name: string
+  song_title: string
+  lyric_line: string
   lyric_translation: string | null
-  loop_count: number | null
-  progress: number | null
-  mood: string | null
-  topic: string | null
-  is_live: boolean | null
-  listeners: number | null
+  loop_count: number
+  progress: number
+  mood: string
+  topic: string
+  is_live: boolean
+  listeners: number
   created_at: string
 }
 
@@ -31,98 +44,277 @@ type SpaceMessage = {
   space_id: string
   sender_id: string | null
   sender_code: string | null
-  kind: string
+  kind: 'user' | 'system' | 'music' | 'audio'
   text: string
+  image_data?: string | null
+  image_mime_type?: string | null
+  audio_data?: string | null
+  audio_mime_type?: string | null
+  audio_duration_text?: string | null
   created_at: string
+}
+
+type SpaceMember = {
+  space_id: string
+  user_id: string
+  joined_at: string
+  last_seen_at: string
+}
+
+type SpaceLike = {
+  space_id: string
+  user_id: string
+  created_at: string
+}
+
+type SpaceVisit = {
+  id: string
+  space_id: string
+  user_id: string
+  created_at: string
+}
+
+type SpaceComment = {
+  id: string
+  space_id: string
+  author_id: string
+  author_code: string
+  text: string
+  image_data: string | null
+  image_mime_type: string | null
+  created_at: string
+}
+
+type DirectMessage = {
+  id: string
+  sender_id: string
+  receiver_id: string
+  sender_code: string
+  receiver_code: string
+  text: string
+  image_data: string | null
+  image_mime_type: string | null
+  audio_data: string | null
+  audio_mime_type: string | null
+  audio_duration_text: string | null
+  is_read: boolean
+  created_at: string
+}
+
+type CreateSpaceForm = {
+  title: string
+  theme_kind: string
+  topic: string
+  mood: string
+  artist_name: string
+  song_title: string
+  lyric_line: string
+  lyric_translation: string
+}
+
+const ACTIVE_MEMBER_WINDOW_MS = 20_000
+const PRESENCE_HEARTBEAT_MS = 10_000
+
+const defaultCreateSpaceForm: CreateSpaceForm = {
+  title: '',
+  theme_kind: '任意主题',
+  topic: '',
+  mood: '安静',
+  artist_name: '',
+  song_title: '',
+  lyric_line: '',
+  lyric_translation: '',
 }
 
 function App() {
   const [user, setUser] = useState<User | null>(null)
   const [profile, setProfile] = useState<Profile | null>(null)
-
+  const [profiles, setProfiles] = useState<Profile[]>([])
   const [spaces, setSpaces] = useState<Space[]>([])
-  const [selectedSpace, setSelectedSpace] = useState<Space | null>(null)
+  const [spaceMembers, setSpaceMembers] = useState<SpaceMember[]>([])
+  const [spaceLikes, setSpaceLikes] = useState<SpaceLike[]>([])
+  const [spaceVisits, setSpaceVisits] = useState<SpaceVisit[]>([])
+  const [spaceComments, setSpaceComments] = useState<SpaceComment[]>([])
+  const [directMessages, setDirectMessages] = useState<DirectMessage[]>([])
   const [messages, setMessages] = useState<SpaceMessage[]>([])
 
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
+  const [selectedSpaceId, setSelectedSpaceId] = useState<string | null>(null)
+  const [roomOpenedAt, setRoomOpenedAt] = useState<string | null>(null)
+
+  const [authEmail, setAuthEmail] = useState('')
+  const [authPassword, setAuthPassword] = useState('')
   const [inviteCode, setInviteCode] = useState('')
   const [draft, setDraft] = useState('')
+  const [directDraft, setDirectDraft] = useState('')
+  const [searchQuery, setSearchQuery] = useState('')
+  const [taglineDraft, setTaglineDraft] = useState('')
+  const [commentDraft, setCommentDraft] = useState('')
+  const [createSpaceForm, setCreateSpaceForm] = useState<CreateSpaceForm>(defaultCreateSpaceForm)
+
   const [message, setMessage] = useState('')
-
   const [isTextMode, setIsTextMode] = useState(true)
+  const [isShowingCreateSpace, setIsShowingCreateSpace] = useState(false)
+  const [isShowingSearch, setIsShowingSearch] = useState(false)
+  const [isShowingProfile, setIsShowingProfile] = useState(false)
+  const [isShowingSettings, setIsShowingSettings] = useState(false)
+  const [isShowingDirectList, setIsShowingDirectList] = useState(false)
   const [isShowingDetail, setIsShowingDetail] = useState(false)
+  const [isShowingVisits, setIsShowingVisits] = useState(false)
+  const [isShowingComments, setIsShowingComments] = useState(false)
+  const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null)
+  const [selectedDirectPeerId, setSelectedDirectPeerId] = useState<string | null>(null)
+  const [isEditingTagline, setIsEditingTagline] = useState(false)
   const [sending, setSending] = useState(false)
+  const [isBusy, setIsBusy] = useState(false)
 
-  useEffect(() => {
-    supabase.auth.getUser().then(async ({ data }) => {
-      setUser(data.user)
+  const deferredSearchQuery = useDeferredValue(searchQuery)
 
-      if (data.user) {
-        await loadProfile(data.user.id)
-        await loadSpaces()
+  const profileById = useMemo(
+    () => Object.fromEntries(profiles.map((item) => [item.id, item])),
+    [profiles],
+  )
+
+  const selectedSpace = spaces.find((item) => item.id === selectedSpaceId) ?? null
+  const selectedProfile = selectedProfileId ? profileById[selectedProfileId] ?? null : null
+
+  const activeMembersBySpace = useMemo(() => {
+    const cutoff = Date.now() - ACTIVE_MEMBER_WINDOW_MS
+    const map = new Map<string, Profile[]>()
+    spaceMembers.forEach((member) => {
+      if (new Date(member.last_seen_at).getTime() < cutoff) return
+      const memberProfile = profileById[member.user_id]
+      if (!memberProfile) return
+      const existing = map.get(member.space_id) ?? []
+      if (!existing.some((item) => item.id === memberProfile.id)) {
+        existing.push(memberProfile)
+        map.set(member.space_id, existing)
       }
     })
+    return map
+  }, [profileById, spaceMembers])
 
-    const { data: listener } = supabase.auth.onAuthStateChange(async (_event, session) => {
-      setUser(session?.user ?? null)
+  const likesBySpace = useMemo(() => {
+    const map = new Map<string, SpaceLike[]>()
+    spaceLikes.forEach((like) => {
+      const existing = map.get(like.space_id) ?? []
+      existing.push(like)
+      map.set(like.space_id, existing)
+    })
+    return map
+  }, [spaceLikes])
 
-      if (session?.user) {
-        await loadProfile(session.user.id)
-        await loadSpaces()
-      } else {
-        setProfile(null)
-        setSpaces([])
-        setSelectedSpace(null)
-        setMessages([])
-      }
+  const visitsBySpace = useMemo(() => {
+    const map = new Map<string, SpaceVisit[]>()
+    spaceVisits.forEach((visit) => {
+      const existing = map.get(visit.space_id) ?? []
+      existing.push(visit)
+      map.set(visit.space_id, existing)
+    })
+    return map
+  }, [spaceVisits])
+
+  const commentsBySpace = useMemo(() => {
+    const map = new Map<string, SpaceComment[]>()
+    spaceComments.forEach((comment) => {
+      const existing = map.get(comment.space_id) ?? []
+      existing.push(comment)
+      map.set(comment.space_id, existing)
+    })
+    return map
+  }, [spaceComments])
+
+  const unreadDirectCount = useMemo(() => {
+    if (!user) return 0
+    return directMessages.filter((item) => item.receiver_id === user.id && !item.is_read).length
+  }, [directMessages, user])
+
+  const directConversations = useMemo(() => {
+    if (!user) return []
+
+    const map = new Map<string, DirectMessage[]>()
+    directMessages.forEach((item) => {
+      const peerId = item.sender_id === user.id ? item.receiver_id : item.sender_id
+      const existing = map.get(peerId) ?? []
+      existing.push(item)
+      map.set(peerId, existing)
     })
 
-    const spacesChannel = supabase
-      .channel('spaces_changes')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'spaces' },
-        () => loadSpaces()
-      )
-      .subscribe()
-
-    const messagesChannel = supabase
-      .channel('space_messages_changes')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'space_messages' },
-        () => {
-          if (selectedSpace) {
-            loadSpaceMessages(selectedSpace.id)
-          }
+    return Array.from(map.entries())
+      .map(([peerId, rows]) => {
+        const sorted = [...rows].sort((left, right) => left.created_at.localeCompare(right.created_at))
+        const lastMessage = sorted[sorted.length - 1]
+        const peer = profileById[peerId] ?? null
+        const unreadCount = rows.filter((item) => item.receiver_id === user.id && !item.is_read).length
+        return {
+          peerId,
+          peer,
+          rows: sorted,
+          lastMessage,
+          unreadCount,
         }
-      )
-      .subscribe()
+      })
+      .sort((left, right) => right.lastMessage.created_at.localeCompare(left.lastMessage.created_at))
+  }, [directMessages, profileById, user])
 
-    return () => {
-      listener.subscription.unsubscribe()
-      supabase.removeChannel(spacesChannel)
-      supabase.removeChannel(messagesChannel)
-    }
-  }, [selectedSpace?.id])
+  const selectedDirectConversation = useMemo(() => {
+    if (!selectedDirectPeerId) return null
+    return directConversations.find((item) => item.peerId === selectedDirectPeerId) ?? null
+  }, [directConversations, selectedDirectPeerId])
 
-  async function loadProfile(userId: string) {
+  const visibleMessages = useMemo(() => {
+    if (!roomOpenedAt) return messages
+    return messages.filter((item) => new Date(item.created_at).getTime() >= new Date(roomOpenedAt).getTime())
+  }, [messages, roomOpenedAt])
+
+  const searchableSpaces = useMemo(() => {
+    const query = deferredSearchQuery.trim().toLowerCase()
+    if (!query) return spaces
+    return spaces.filter((space) => {
+      const ownerCode = profileById[space.owner_id]?.planet_code ?? ''
+      return [
+        space.title,
+        space.topic,
+        space.artist_name,
+        space.song_title,
+        ownerCode,
+      ]
+        .join(' ')
+        .toLowerCase()
+        .includes(query)
+    })
+  }, [deferredSearchQuery, profileById, spaces])
+
+  const myCommentEntries = useMemo(() => {
+    if (!profile) return []
+    return spaceComments
+      .filter((item) => item.author_id === profile.id)
+      .map((item) => {
+        const space = spaces.find((entry) => entry.id === item.space_id)
+        return {
+          ...item,
+          spaceTitle: space?.title ?? '未知时空',
+        }
+      })
+      .sort((left, right) => right.created_at.localeCompare(left.created_at))
+  }, [profile, spaceComments, spaces])
+
+  const loadProfiles = useEffectEvent(async () => {
     const { data, error } = await supabase
       .from('profiles')
-      .select('id, email, planet_code')
-      .eq('id', userId)
-      .single()
+      .select('id, email, planet_code, avatar_seed, position_description, tagline, created_at')
+      .order('created_at', { ascending: true })
 
     if (error) {
       setMessage(`读取用户资料失败：${error.message}`)
       return
     }
 
-    setProfile(data)
-  }
+    startTransition(() => {
+      setProfiles((data ?? []) as Profile[])
+    })
+  })
 
-  async function loadSpaces() {
+  const loadSpaces = useEffectEvent(async () => {
     const { data, error } = await supabase
       .from('spaces')
       .select('id, owner_id, title, theme_kind, artist_name, song_title, lyric_line, lyric_translation, loop_count, progress, mood, topic, is_live, listeners, created_at')
@@ -133,13 +325,101 @@ function App() {
       return
     }
 
-    setSpaces(data ?? [])
-  }
+    startTransition(() => {
+      setSpaces((data ?? []) as Space[])
+    })
+  })
 
-  async function loadSpaceMessages(spaceId: string) {
+  const loadSpaceMembers = useEffectEvent(async () => {
+    const { data, error } = await supabase
+      .from('space_members')
+      .select('space_id, user_id, joined_at, last_seen_at')
+
+    if (error) {
+      setMessage(`读取在线成员失败：${error.message}`)
+      return
+    }
+
+    startTransition(() => {
+      setSpaceMembers((data ?? []) as SpaceMember[])
+    })
+  })
+
+  const loadSpaceLikes = useEffectEvent(async () => {
+    const { data, error } = await supabase
+      .from('space_likes')
+      .select('space_id, user_id, created_at')
+
+    if (error) {
+      setMessage(`读取喜欢记录失败：${error.message}`)
+      return
+    }
+
+    startTransition(() => {
+      setSpaceLikes((data ?? []) as SpaceLike[])
+    })
+  })
+
+  const loadSpaceVisits = useEffectEvent(async () => {
+    const { data, error } = await supabase
+      .from('space_visits')
+      .select('id, space_id, user_id, created_at')
+      .order('created_at', { ascending: false })
+
+    if (error) {
+      setMessage(`读取来过记录失败：${error.message}`)
+      return
+    }
+
+    startTransition(() => {
+      setSpaceVisits((data ?? []) as SpaceVisit[])
+    })
+  })
+
+  const loadSpaceComments = useEffectEvent(async () => {
+    const { data, error } = await supabase
+      .from('space_comments')
+      .select('id, space_id, author_id, author_code, text, image_data, image_mime_type, created_at')
+      .order('created_at', { ascending: false })
+
+    if (error) {
+      setMessage(`读取留言板失败：${error.message}`)
+      return
+    }
+
+    startTransition(() => {
+      setSpaceComments((data ?? []) as SpaceComment[])
+    })
+  })
+
+  const loadDirectMessages = useEffectEvent(async () => {
+    if (!user) return
+
+    const { data, error } = await supabase
+      .from('direct_messages')
+      .select('id, sender_id, receiver_id, sender_code, receiver_code, text, image_data, image_mime_type, audio_data, audio_mime_type, audio_duration_text, is_read, created_at')
+      .or(`sender_id.eq.${user.id},receiver_id.eq.${user.id}`)
+      .order('created_at', { ascending: true })
+
+    if (error) {
+      setMessage(`读取私聊失败：${error.message}`)
+      return
+    }
+
+    startTransition(() => {
+      setDirectMessages((data ?? []) as DirectMessage[])
+    })
+  })
+
+  const loadMessages = useEffectEvent(async (spaceId: string | null) => {
+    if (!spaceId) {
+      setMessages([])
+      return
+    }
+
     const { data, error } = await supabase
       .from('space_messages')
-      .select('id, space_id, sender_id, sender_code, kind, text, created_at')
+      .select('id, space_id, sender_id, sender_code, kind, text, image_data, image_mime_type, audio_data, audio_mime_type, audio_duration_text, created_at')
       .eq('space_id', spaceId)
       .order('created_at', { ascending: true })
 
@@ -148,51 +428,310 @@ function App() {
       return
     }
 
-    setMessages(data ?? [])
-  }
+    startTransition(() => {
+      setMessages((data ?? []) as SpaceMessage[])
+    })
+  })
+
+  const ensureProfile = useEffectEvent(async (authUser: User) => {
+    const { data: existing, error } = await supabase
+      .from('profiles')
+      .select('id, email, planet_code, avatar_seed, position_description, tagline, created_at')
+      .eq('id', authUser.id)
+      .maybeSingle()
+
+    if (error) {
+      setMessage(`读取个人资料失败：${error.message}`)
+      return null
+    }
+
+    if (existing) {
+      setProfile(existing as Profile)
+      setTaglineDraft((existing as Profile).tagline ?? '')
+      return existing as Profile
+    }
+
+    const code = `P-${authUser.id.replace(/-/g, '').slice(0, 8).toUpperCase()}`
+    const seed = authUser.id.replace(/-/g, '').slice(0, 12)
+    const position = `${code}是一颗位于静默星带的小星星，距离地球 ${120 + code.length * 7}.00 光年。`
+
+    const payload = {
+      id: authUser.id,
+      email: authUser.email ?? '',
+      planet_code: code,
+      avatar_seed: seed,
+      position_description: position,
+      tagline: '今天也想安静地待一会儿',
+    }
+
+    const { data: inserted, error: insertError } = await supabase
+      .from('profiles')
+      .insert(payload)
+      .select('id, email, planet_code, avatar_seed, position_description, tagline, created_at')
+      .single()
+
+    if (insertError) {
+      setMessage(`创建个人资料失败：${insertError.message}`)
+      return null
+    }
+
+    setProfile(inserted as Profile)
+    setTaglineDraft((inserted as Profile).tagline ?? '')
+    return inserted as Profile
+  })
+
+  const syncAll = useEffectEvent(async (authUser: User | null) => {
+    if (!authUser) return
+    const ensuredProfile = await ensureProfile(authUser)
+    if (!ensuredProfile) return
+
+    await Promise.all([
+      loadProfiles(),
+      loadSpaces(),
+      loadSpaceMembers(),
+      loadSpaceLikes(),
+      loadSpaceVisits(),
+      loadSpaceComments(),
+      loadDirectMessages(),
+    ])
+
+    if (selectedSpaceId) {
+      await loadMessages(selectedSpaceId)
+    }
+  })
+
+  useEffect(() => {
+    let mounted = true
+
+    void supabase.auth.getUser().then(async ({ data }) => {
+      if (!mounted) return
+      setUser(data.user)
+      if (data.user) {
+        await syncAll(data.user)
+      }
+    })
+
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      startTransition(() => {
+        setUser(session?.user ?? null)
+      })
+
+      if (session?.user) {
+        void syncAll(session.user)
+      } else {
+        startTransition(() => {
+          setProfile(null)
+          setProfiles([])
+          setSpaces([])
+          setSpaceMembers([])
+          setSpaceLikes([])
+          setSpaceVisits([])
+          setSpaceComments([])
+          setDirectMessages([])
+          setMessages([])
+          setSelectedSpaceId(null)
+          setRoomOpenedAt(null)
+          setTaglineDraft('')
+          setSelectedDirectPeerId(null)
+        })
+      }
+    })
+
+    return () => {
+      mounted = false
+      listener.subscription.unsubscribe()
+    }
+  }, [selectedSpaceId, syncAll])
+
+  useEffect(() => {
+    const channels = [
+      supabase
+        .channel('profiles-sync')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, () => {
+          void loadProfiles()
+        })
+        .subscribe(),
+      supabase
+        .channel('spaces-sync')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'spaces' }, () => {
+          void loadSpaces()
+        })
+        .subscribe(),
+      supabase
+        .channel('space-members-sync')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'space_members' }, () => {
+          void loadSpaceMembers()
+        })
+        .subscribe(),
+      supabase
+        .channel('space-likes-sync')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'space_likes' }, () => {
+          void loadSpaceLikes()
+        })
+        .subscribe(),
+      supabase
+        .channel('space-visits-sync')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'space_visits' }, () => {
+          void loadSpaceVisits()
+        })
+        .subscribe(),
+      supabase
+        .channel('space-comments-sync')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'space_comments' }, () => {
+          void loadSpaceComments()
+        })
+        .subscribe(),
+      supabase
+        .channel('space-messages-sync')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'space_messages' }, () => {
+          void loadMessages(selectedSpaceId)
+        })
+        .subscribe(),
+      supabase
+        .channel('direct-messages-sync')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'direct_messages' }, () => {
+          void loadDirectMessages()
+        })
+        .subscribe(),
+    ]
+
+    return () => {
+      channels.forEach((channel) => {
+        void supabase.removeChannel(channel)
+      })
+    }
+  }, [
+    loadMessages,
+    loadDirectMessages,
+    loadProfiles,
+    loadSpaceComments,
+    loadSpaceLikes,
+    loadSpaceMembers,
+    loadSpaceVisits,
+    loadSpaces,
+    selectedSpaceId,
+  ])
+
+  useEffect(() => {
+    if (!user || !selectedSpaceId) return
+
+    let cancelled = false
+
+    const sendPresence = async () => {
+      if (cancelled) return
+      await supabase
+        .from('space_members')
+        .upsert(
+          {
+            space_id: selectedSpaceId,
+            user_id: user.id,
+            last_seen_at: new Date().toISOString(),
+          },
+          { onConflict: 'space_id,user_id' },
+        )
+    }
+
+    void sendPresence()
+    void supabase.from('space_visits').insert({
+      space_id: selectedSpaceId,
+      user_id: user.id,
+    })
+
+    const timer = window.setInterval(() => {
+      void sendPresence()
+    }, PRESENCE_HEARTBEAT_MS)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+      void supabase
+        .from('space_members')
+        .delete()
+        .eq('space_id', selectedSpaceId)
+        .eq('user_id', user.id)
+    }
+  }, [selectedSpaceId, user])
+
+  useEffect(() => {
+    if (!selectedDirectPeerId) return
+    void markDirectMessagesRead(selectedDirectPeerId)
+  }, [directMessages, selectedDirectPeerId])
 
   async function openSpace(space: Space) {
-    setSelectedSpace(space)
+    setSelectedSpaceId(space.id)
+    setRoomOpenedAt(new Date().toISOString())
     setIsShowingDetail(false)
-    await loadSpaceMessages(space.id)
+    setMessage('')
+    await loadMessages(space.id)
+  }
+
+  async function handleCreateSpace() {
+    if (!user || !profile) return
+
+    const title = createSpaceForm.title.trim()
+    const themeKind = createSpaceForm.theme_kind
+    const artist = createSpaceForm.artist_name.trim()
+    const song = createSpaceForm.song_title.trim()
+    const topic = createSpaceForm.topic.trim()
+    const lyric = createSpaceForm.lyric_line.trim()
+    const translation = createSpaceForm.lyric_translation.trim()
+
+    const finalTitle =
+      title ||
+      (themeKind === '歌曲'
+        ? [artist, song].filter(Boolean).join(' - ') || '未命名歌曲时空'
+        : '未命名时空')
+
+    setIsBusy(true)
+    const { data, error } = await supabase
+      .from('spaces')
+      .insert({
+        owner_id: user.id,
+        title: finalTitle,
+        theme_kind: themeKind,
+        artist_name: artist || profile.planet_code,
+        song_title: song || finalTitle,
+        lyric_line: lyric || (themeKind === '歌曲' ? '暂无歌词' : ''),
+        lyric_translation: translation || null,
+        loop_count: 1,
+        progress: themeKind === '歌曲' ? 0.36 : 0,
+        mood: createSpaceForm.mood,
+        topic: topic || '随便聊聊',
+        is_live: false,
+        listeners: 0,
+      })
+      .select('id, owner_id, title, theme_kind, artist_name, song_title, lyric_line, lyric_translation, loop_count, progress, mood, topic, is_live, listeners, created_at')
+      .single()
+    setIsBusy(false)
+
+    if (error) {
+      setMessage(`创建时空失败：${error.message}`)
+      return
+    }
+
+    setIsShowingCreateSpace(false)
+    setCreateSpaceForm(defaultCreateSpaceForm)
+    await loadSpaces()
+    await openSpace(data as Space)
   }
 
   async function sendTextMessage() {
-    setMessage('')
-
-    if (!user) {
-      setMessage('请先登录')
-      return
-    }
-
-    if (!profile) {
-      setMessage('用户资料未加载，请刷新后再试')
-      return
-    }
-
-    if (!selectedSpace) {
+    if (!user || !profile || !selectedSpace) {
       setMessage('请先进入一个时空')
       return
     }
 
     const text = draft.trim()
-
-    if (!text) {
-      return
-    }
+    if (!text) return
 
     setSending(true)
-
-    const { error } = await supabase
-      .from('space_messages')
-      .insert({
-        space_id: selectedSpace.id,
-        sender_id: user.id,
-        sender_code: profile.planet_code,
-        kind: 'user',
-        text,
-      })
-
+    const { error } = await supabase.from('space_messages').insert({
+      space_id: selectedSpace.id,
+      sender_id: user.id,
+      sender_code: profile.planet_code,
+      kind: 'user',
+      text,
+    })
     setSending(false)
 
     if (error) {
@@ -201,41 +740,111 @@ function App() {
     }
 
     setDraft('')
-    await loadSpaceMessages(selectedSpace.id)
+    await loadMessages(selectedSpace.id)
   }
 
-  async function sendEmojiEvent() {
+  async function sendWarmEvent() {
     if (!user || !profile || !selectedSpace) return
 
-    const { error } = await supabase
-      .from('space_messages')
-      .insert({
-        space_id: selectedSpace.id,
-        sender_id: user.id,
-        sender_code: profile.planet_code,
-        kind: 'system',
-        text: '欢迎欢迎👏',
-      })
+    const { error } = await supabase.from('space_messages').insert({
+      space_id: selectedSpace.id,
+      sender_id: null,
+      sender_code: null,
+      kind: 'system',
+      text: '欢迎欢迎👏',
+    })
 
     if (error) {
       setMessage(`发送失败：${error.message}`)
       return
     }
 
-    await loadSpaceMessages(selectedSpace.id)
+    await loadMessages(selectedSpace.id)
+  }
+
+  async function handleLikeSpace() {
+    if (!user || !selectedSpace) return
+
+    const alreadyLiked = (likesBySpace.get(selectedSpace.id) ?? []).some((item) => item.user_id === user.id)
+    if (alreadyLiked) return
+
+    const { error } = await supabase.from('space_likes').insert({
+      space_id: selectedSpace.id,
+      user_id: user.id,
+    })
+
+    if (error) {
+      setMessage(`记录喜欢失败：${error.message}`)
+      return
+    }
+
+    await loadSpaceLikes()
+  }
+
+  async function postComment() {
+    if (!user || !profile || !selectedSpace) return
+    const text = commentDraft.trim()
+    if (!text) return
+
+    const { error } = await supabase.from('space_comments').insert({
+      space_id: selectedSpace.id,
+      author_id: user.id,
+      author_code: profile.planet_code,
+      text,
+      image_data: null,
+      image_mime_type: null,
+    })
+
+    if (error) {
+      setMessage(`留言失败：${error.message}`)
+      return
+    }
+
+    setCommentDraft('')
+    await loadSpaceComments()
+  }
+
+  async function deleteComment(commentId: string) {
+    const { error } = await supabase.from('space_comments').delete().eq('id', commentId)
+    if (error) {
+      setMessage(`删除留言失败：${error.message}`)
+      return
+    }
+    await loadSpaceComments()
+  }
+
+  async function saveTagline() {
+    if (!user) return
+    const nextTagline = taglineDraft.trim() || '今天也想安静地待一会儿'
+    const { error } = await supabase
+      .from('profiles')
+      .update({ tagline: nextTagline })
+      .eq('id', user.id)
+
+    if (error) {
+      setMessage(`保存个人说明失败：${error.message}`)
+      return
+    }
+
+    setIsEditingTagline(false)
+    await loadProfiles()
+    const nextProfile = profileById[user.id]
+    if (nextProfile) {
+      setProfile({ ...nextProfile, tagline: nextTagline })
+    }
   }
 
   async function signUp() {
     setMessage('')
 
-    if (!email || !password || !inviteCode) {
+    if (!authEmail || !authPassword || !inviteCode) {
       setMessage('请填写邮箱、密码和邀请码')
       return
     }
 
     const { data, error } = await supabase.auth.signUp({
-      email,
-      password,
+      email: authEmail,
+      password: authPassword,
     })
 
     if (error) {
@@ -244,7 +853,7 @@ function App() {
     }
 
     if (!data.user) {
-      setMessage('注册成功，请先验证邮箱后登录')
+      setMessage('注册成功，请登录后继续')
       return
     }
 
@@ -267,10 +876,9 @@ function App() {
 
   async function signIn() {
     setMessage('')
-
     const { error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
+      email: authEmail,
+      password: authPassword,
     })
 
     if (error) {
@@ -283,647 +891,586 @@ function App() {
 
   async function signOut() {
     await supabase.auth.signOut()
+    setIsShowingProfile(false)
+    setIsShowingSettings(false)
+    setIsShowingDirectList(false)
+    setSelectedSpaceId(null)
   }
+
+  async function openDirectConversation(peerId: string) {
+    setSelectedProfileId(null)
+    setIsShowingDirectList(false)
+    setSelectedDirectPeerId(peerId)
+    await markDirectMessagesRead(peerId)
+  }
+
+  async function markDirectMessagesRead(peerId: string) {
+    if (!user) return
+
+    const unreadRows = directMessages.filter(
+      (item) => item.sender_id === peerId && item.receiver_id === user.id && !item.is_read,
+    )
+
+    if (!unreadRows.length) return
+
+    const unreadIDs = unreadRows.map((item) => item.id)
+    const { error } = await supabase
+      .from('direct_messages')
+      .update({ is_read: true })
+      .in('id', unreadIDs)
+
+    if (error) {
+      setMessage(`更新私聊未读失败：${error.message}`)
+      return
+    }
+
+    await loadDirectMessages()
+  }
+
+  async function sendDirectText() {
+    if (!user || !profile || !selectedDirectConversation) return
+
+    const text = directDraft.trim()
+    if (!text) return
+
+    setSending(true)
+    const { error } = await supabase.from('direct_messages').insert({
+      sender_id: user.id,
+      receiver_id: selectedDirectConversation.peerId,
+      sender_code: profile.planet_code,
+      receiver_code: selectedDirectConversation.peer?.planet_code ?? selectedDirectConversation.peerId,
+      text,
+      image_data: null,
+      image_mime_type: null,
+      audio_data: null,
+      audio_mime_type: null,
+      audio_duration_text: null,
+      is_read: false,
+    })
+    setSending(false)
+
+    if (error) {
+      setMessage(`发送私聊失败：${error.message}`)
+      return
+    }
+
+    setDirectDraft('')
+    await loadDirectMessages()
+  }
+
+  const currentMembers = selectedSpace ? activeMembersBySpace.get(selectedSpace.id) ?? [] : []
+  const currentLikes = selectedSpace ? likesBySpace.get(selectedSpace.id) ?? [] : []
+  const currentVisits = selectedSpace ? visitsBySpace.get(selectedSpace.id) ?? [] : []
+  const currentComments = selectedSpace ? commentsBySpace.get(selectedSpace.id) ?? [] : []
+  const likedByMe = !!selectedSpace && !!user && currentLikes.some((item) => item.user_id === user.id)
 
   if (!user) {
     return (
-      <div style={styles.loginPage}>
-        <div style={styles.loginCard}>
-          <h1 style={styles.loginTitle}>0305</h1>
-          <p style={styles.loginSub}>进入我们的星球</p>
+      <div className="app-shell auth-shell">
+        <div className="ambient-grid" />
+        <section className="auth-card">
+          <p className="eyebrow">0305</p>
+          <h1>进入我们的时空</h1>
+          <p className="auth-copy">用你自己的小行星代码，在这里安静地连上线。</p>
 
-          <input
-            style={styles.loginInput}
-            placeholder="邮箱"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-          />
+          <input className="field" placeholder="邮箱" value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} />
+          <input className="field" placeholder="密码" type="password" value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} />
+          <input className="field" placeholder="邀请码" value={inviteCode} onChange={(event) => setInviteCode(event.target.value)} />
 
-          <input
-            style={styles.loginInput}
-            placeholder="密码"
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-          />
-
-          <input
-            style={styles.loginInput}
-            placeholder="邀请码"
-            value={inviteCode}
-            onChange={(e) => setInviteCode(e.target.value)}
-          />
-
-          <button style={styles.blackButton} onClick={signUp}>注册</button>
-          <button style={styles.whiteButton} onClick={signIn}>登录</button>
-
-          {message && <p style={styles.message}>{message}</p>}
-        </div>
-      </div>
-    )
-  }
-
-  if (selectedSpace && isShowingDetail) {
-    return (
-      <div style={styles.page}>
-        <div style={styles.detailTop}>
-          <button style={styles.backIcon} onClick={() => setIsShowingDetail(false)}>‹</button>
-        </div>
-
-        <main style={styles.detailMain}>
-          <h1 style={styles.detailTitle}>{selectedSpace.title}</h1>
-
-          <div style={styles.ownerRow}>
-            <div style={styles.bigAvatar}>
-              {(selectedSpace.artist_name || profile?.planet_code || '??').slice(0, 2)}
-            </div>
-
-            <div>
-              <div style={styles.ownerName}>
-                {selectedSpace.artist_name || '未知用户'}
-                {selectedSpace.owner_id === user.id && (
-                  <span style={styles.ownerBadge}>时空主人</span>
-                )}
-              </div>
-
-              <div style={styles.createdText}>
-                创建于：{formatDate(selectedSpace.created_at)}
-              </div>
-            </div>
+          <div className="auth-actions">
+            <button className="primary-button" onClick={signUp}>注册</button>
+            <button className="secondary-button" onClick={signIn}>登录</button>
           </div>
 
-          <div style={styles.topicBlock}>
-            <div style={styles.topicLine}></div>
-            <p style={styles.topicText}>
-              TA说： {selectedSpace.topic || selectedSpace.lyric_line || selectedSpace.title}
-            </p>
-          </div>
-        </main>
-
-        <section style={styles.detailList}>
-          <div style={styles.listRow}>
-            <span style={styles.listIcon}>☺</span>
-            <span style={styles.listTitle}>累计来过</span>
-            <span style={styles.listValue}>{selectedSpace.listeners ?? 0}</span>
-            <span style={styles.arrow}>›</span>
-          </div>
-
-          <div style={styles.listRow}>
-            <span style={styles.heart}>♥</span>
-            <span style={styles.listTitle}>喜欢这个时空</span>
-            <span style={styles.listValue}>0</span>
-            <span style={styles.arrow}>›</span>
-          </div>
-
-          <div style={styles.listRow}>
-            <span style={styles.listIcon}>✎</span>
-            <span style={styles.listTitle}>留言板</span>
-            <span style={styles.listValue}>0</span>
-            <span style={styles.arrow}>›</span>
-          </div>
+          {message ? <p className="feedback-text">{message}</p> : null}
         </section>
       </div>
     )
   }
 
-  if (selectedSpace) {
-    return (
-      <div style={styles.roomPage}>
-        <header style={styles.roomHeader}>
-          <div style={styles.roomTitleRow}>
-            <h1 style={styles.roomTitle}>{selectedSpace.title}</h1>
-
-            <div style={styles.roomActions}>
-              <button style={styles.roomIconButton} onClick={() => setSelectedSpace(null)}>↘</button>
-              <button style={styles.roomIconButton} onClick={() => setIsShowingDetail(true)}>•••</button>
-            </div>
-          </div>
-
-          <div style={styles.memberRow}>
-            <div style={styles.smallAvatar}>
-              {(selectedSpace.artist_name || profile?.planet_code || '??').slice(0, 2)}
-            </div>
-
-            <div style={styles.memberSpacer}></div>
-
-            <div style={styles.peoplePill}>
-              此刻{selectedSpace.listeners ?? 0}人
-            </div>
-          </div>
-        </header>
-
-        <div style={styles.divider}></div>
-
-        <main style={styles.messageStream}>
-          {messages.map((item) => {
-            if (item.kind === 'system') {
-              return (
-                <div key={item.id} style={styles.systemMessage}>
-                  <div>{item.text}</div>
-                  <div style={styles.timeText}>{formatTime(item.created_at)}</div>
-                </div>
-              )
-            }
-
-            return (
-              <div key={item.id} style={styles.userMessage}>
-                {item.sender_code && (
-                  <div style={styles.senderCode}>{item.sender_code}</div>
-                )}
-                <div style={styles.messageText}>{item.text}</div>
-              </div>
-            )
-          })}
-
-          {messages.length === 0 && (
-            <div style={styles.emptyRoom}>这里还没有人说话</div>
-          )}
-
-          {message && <p style={styles.message}>{message}</p>}
-        </main>
-
-        <footer style={styles.inputBar}>
-          <button style={styles.emojiButton} onClick={sendEmojiEvent}>☺</button>
-
-          {isTextMode ? (
-            <input
-              style={styles.chatInput}
-              placeholder="一起说会儿话吧..."
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  sendTextMessage()
-                }
-              }}
-            />
-          ) : (
-            <button style={styles.voiceButton}>按住说话</button>
-          )}
-
-          <button style={styles.roundButton} onClick={() => setIsTextMode(!isTextMode)}>
-            {isTextMode ? '🎙' : '⌨'}
-          </button>
-
-          <button style={styles.roundButton}>▧</button>
-
-          {isTextMode && (
-            <button style={styles.sendMiniButton} onClick={sendTextMessage} disabled={sending}>
-              发
-            </button>
-          )}
-        </footer>
-      </div>
-    )
-  }
-
   return (
-    <div style={styles.page}>
-      <header style={styles.homeHeader}>
-        <button style={styles.homeIcon}>♙</button>
+    <div className="app-shell">
+      <div className="ambient-grid" />
 
-        <div style={styles.homeRight}>
-          <button style={styles.searchIcon}>⌕</button>
-          <button style={styles.profileCircle}></button>
-        </div>
-      </header>
+      {selectedSpace ? (
+        <section className="room-screen">
+          <header className="room-header">
+            <div className="room-title-row">
+              <h1>{selectedSpace.title}</h1>
+              <div className="room-actions">
+                <button className="icon-button" onClick={() => setSelectedSpaceId(null)}>↘</button>
+                <button className="icon-button" onClick={() => setIsShowingDetail(true)}>•••</button>
+              </div>
+            </div>
 
-      <main style={styles.grid}>
-        {spaces.map((space) => (
-          <button
-            key={space.id}
-            style={styles.spaceCell}
-            onClick={() => openSpace(space)}
-          >
-            <div style={styles.spaceTitle}>{space.title}</div>
-            <div style={styles.spaceSub}>此刻{space.listeners ?? 0}人</div>
-          </button>
-        ))}
+            <div className="member-strip">
+              <div className="member-badges">
+                {currentMembers.length > 0 ? currentMembers.slice(0, 8).map((member) => (
+                  <button
+                    key={member.id}
+                    className="member-badge"
+                    onClick={() => setSelectedProfileId(member.id)}
+                  >
+                    {member.planet_code.slice(0, 2).toUpperCase()}
+                  </button>
+                )) : (
+                  <div className="member-badge ghost">··</div>
+                )}
+              </div>
 
-        <button style={styles.addCell}>＋</button>
-      </main>
+              <div className="count-pill">此刻{currentMembers.length}人</div>
+            </div>
+          </header>
 
-      <button style={styles.logoutButton} onClick={signOut}>
-        退出登录
-      </button>
+          <main className="message-stream">
+            {roomOpenedAt ? <div className="center-time">{formatTime(roomOpenedAt)}</div> : null}
 
-      {message && <p style={styles.message}>{message}</p>}
+            {visibleMessages.map((item) => (
+              item.kind === 'system' ? (
+                <div key={item.id} className="stream-event">
+                  <p>{item.text}</p>
+                  <span>{formatTime(item.created_at)}</span>
+                </div>
+              ) : (
+                <article key={item.id} className="stream-message">
+                  {item.sender_code ? (
+                    <button
+                      className="sender-chip"
+                      onClick={() => {
+                        const owner = profiles.find((entry) => entry.planet_code === item.sender_code)
+                        if (owner) setSelectedProfileId(owner.id)
+                      }}
+                    >
+                      {item.sender_code}
+                    </button>
+                  ) : null}
+                  {item.text ? <div className="message-bubble">{item.text}</div> : null}
+                </article>
+              )
+            ))}
+
+            {!visibleMessages.length ? <p className="empty-state">你进入之后，这里还没有新的内容。</p> : null}
+            {message ? <p className="feedback-text room-feedback">{message}</p> : null}
+          </main>
+
+          <footer className="room-input">
+            <button className="emoji-control" onClick={sendWarmEvent}>☺</button>
+
+            {isTextMode ? (
+              <input
+                className="message-field"
+                placeholder="一起说会儿话吧..."
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') void sendTextMessage()
+                }}
+              />
+            ) : (
+              <button className="voice-placeholder">按住说话</button>
+            )}
+
+            <button className="mode-toggle" onClick={() => setIsTextMode((value) => !value)}>
+              {isTextMode ? '⌨' : '字'}
+            </button>
+
+            <button className="mode-toggle" disabled title="图片消息将继续迁移">图</button>
+
+            {isTextMode ? (
+              <button className="send-button" disabled={sending} onClick={() => void sendTextMessage()}>发</button>
+            ) : null}
+          </footer>
+        </section>
+      ) : (
+        <section className="home-screen">
+          <header className="home-header">
+            <button className="icon-button left-icon" onClick={() => setIsShowingProfile(true)}>◌</button>
+            <div className="header-actions">
+              <button className="icon-button" onClick={() => setIsShowingSearch(true)}>⌕</button>
+              <button className="icon-button badge-button" onClick={() => setIsShowingDirectList(true)}>
+                私
+                {unreadDirectCount > 0 ? <span className="header-badge" /> : null}
+              </button>
+              <button className="icon-button" onClick={() => setIsShowingCreateSpace(true)}>＋</button>
+            </div>
+          </header>
+
+          <main className="space-grid">
+            {spaces.map((space) => {
+              const liveMembers = activeMembersBySpace.get(space.id) ?? []
+              const tileTitle = space.theme_kind === '歌曲'
+                ? `${space.artist_name} 「${space.song_title}」`
+                : space.title
+
+              return (
+                <button key={space.id} className="space-tile" onClick={() => void openSpace(space)}>
+                  <div className="tile-title">{tileTitle}</div>
+                  <div className="tile-sub">此刻{liveMembers.length}人</div>
+                </button>
+              )
+            })}
+
+            <button className="space-tile create-tile" onClick={() => setIsShowingCreateSpace(true)}>＋</button>
+          </main>
+
+          {message ? <p className="feedback-text home-feedback">{message}</p> : null}
+        </section>
+      )}
+
+      {isShowingCreateSpace ? (
+        <ModalShell title="创建时空" onClose={() => setIsShowingCreateSpace(false)}>
+          <div className="modal-form">
+            <input className="field" placeholder="时空标题" value={createSpaceForm.title} onChange={(event) => setCreateSpaceForm((value) => ({ ...value, title: event.target.value }))} />
+            <select className="field" value={createSpaceForm.theme_kind} onChange={(event) => setCreateSpaceForm((value) => ({ ...value, theme_kind: event.target.value }))}>
+              {['任意主题', '闲聊', '语音室', '歌曲', '电影观后感', '心情', '一起做', '学习', '深夜'].map((item) => (
+                <option key={item} value={item}>{item}</option>
+              ))}
+            </select>
+            <input className="field" placeholder="此刻主题" value={createSpaceForm.topic} onChange={(event) => setCreateSpaceForm((value) => ({ ...value, topic: event.target.value }))} />
+            <input className="field" placeholder="情绪" value={createSpaceForm.mood} onChange={(event) => setCreateSpaceForm((value) => ({ ...value, mood: event.target.value }))} />
+
+            {createSpaceForm.theme_kind === '歌曲' ? (
+              <>
+                <input className="field" placeholder="歌手" value={createSpaceForm.artist_name} onChange={(event) => setCreateSpaceForm((value) => ({ ...value, artist_name: event.target.value }))} />
+                <input className="field" placeholder="歌名" value={createSpaceForm.song_title} onChange={(event) => setCreateSpaceForm((value) => ({ ...value, song_title: event.target.value }))} />
+                <textarea className="field field-area" placeholder="歌词" value={createSpaceForm.lyric_line} onChange={(event) => setCreateSpaceForm((value) => ({ ...value, lyric_line: event.target.value }))} />
+                <textarea className="field field-area" placeholder="歌词翻译" value={createSpaceForm.lyric_translation} onChange={(event) => setCreateSpaceForm((value) => ({ ...value, lyric_translation: event.target.value }))} />
+              </>
+            ) : null}
+
+            <button className="primary-button" disabled={isBusy} onClick={() => void handleCreateSpace()}>
+              {isBusy ? '创建中...' : '创建'}
+            </button>
+          </div>
+        </ModalShell>
+      ) : null}
+
+      {isShowingSearch ? (
+        <ModalShell title="搜索时空" onClose={() => setIsShowingSearch(false)}>
+          <div className="modal-form">
+            <input className="field" placeholder="搜索时空名" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} />
+            <div className="list-stack">
+              {searchableSpaces.map((space) => (
+                <button
+                  key={space.id}
+                  className="list-row"
+                  onClick={() => {
+                    setIsShowingSearch(false)
+                    void openSpace(space)
+                  }}
+                >
+                  <div className="list-row-main">
+                    <span>{space.title}</span>
+                    <small>{profileById[space.owner_id]?.planet_code ?? '未知'} · 此刻{(activeMembersBySpace.get(space.id) ?? []).length}人</small>
+                  </div>
+                  <span>↗</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </ModalShell>
+      ) : null}
+
+      {isShowingProfile && profile ? (
+        <ModalShell title="我的主页" onClose={() => setIsShowingProfile(false)}>
+          <div className="profile-sheet">
+            <div className="profile-position">{profile.position_description}</div>
+            <div className="profile-days">来到「0305」第{daysSince(profile.created_at)}天</div>
+
+            <div className="section-head">
+              <h3>关于我</h3>
+              {!isEditingTagline ? (
+                <button className="text-button" onClick={() => setIsEditingTagline(true)}>编辑</button>
+              ) : null}
+            </div>
+
+            {isEditingTagline ? (
+              <div className="modal-form">
+                <textarea className="field field-area" value={taglineDraft} onChange={(event) => setTaglineDraft(event.target.value)} />
+                <div className="inline-actions">
+                  <button className="secondary-button" onClick={() => {
+                    setTaglineDraft(profile.tagline)
+                    setIsEditingTagline(false)
+                  }}>取消</button>
+                  <button className="primary-button" onClick={() => void saveTagline()}>保存</button>
+                </div>
+              </div>
+            ) : (
+              <button className="tagline-panel" onClick={() => setIsEditingTagline(true)}>
+                {profile.tagline}
+              </button>
+            )}
+
+            <div className="section-head">
+              <h3>在各个时空的留言</h3>
+            </div>
+
+            <div className="list-stack">
+              {myCommentEntries.map((entry) => (
+                <article key={entry.id} className="comment-card">
+                  <div className="comment-meta">
+                    <span>在 {entry.spaceTitle} 留言</span>
+                    <small>{formatMonthDay(entry.created_at)}</small>
+                  </div>
+                  <p>{entry.text || '图片留言'}</p>
+                  <button className="text-button danger-text" onClick={() => void deleteComment(entry.id)}>删除</button>
+                </article>
+              ))}
+              {!myCommentEntries.length ? <p className="empty-state">你还没有留下留言。</p> : null}
+            </div>
+
+            <button className="secondary-button" onClick={() => setIsShowingSettings(true)}>设置</button>
+          </div>
+        </ModalShell>
+      ) : null}
+
+      {isShowingSettings ? (
+        <ModalShell title="设置" onClose={() => setIsShowingSettings(false)}>
+          <div className="modal-form">
+            <button className="secondary-button danger-soft" onClick={() => void signOut()}>退出账号</button>
+          </div>
+        </ModalShell>
+      ) : null}
+
+      {isShowingDirectList ? (
+        <ModalShell title="最近消息" onClose={() => setIsShowingDirectList(false)}>
+          <div className="list-stack">
+            {directConversations.map((conversation) => (
+              <button
+                key={conversation.peerId}
+                className="list-row"
+                onClick={() => void openDirectConversation(conversation.peerId)}
+              >
+                <div className="list-row-main">
+                  <span>{conversation.peer?.planet_code ?? '未知星球'}</span>
+                  <small>{conversation.lastMessage.text || '图片/语音消息'}</small>
+                </div>
+                <div className="conversation-meta">
+                  {conversation.unreadCount > 0 ? <span className="unread-dot" /> : null}
+                  <small>{formatMonthDay(conversation.lastMessage.created_at)}</small>
+                </div>
+              </button>
+            ))}
+            {!directConversations.length ? <p className="empty-state">暂时还没有私聊记录。</p> : null}
+          </div>
+        </ModalShell>
+      ) : null}
+
+      {selectedSpace && isShowingDetail ? (
+        <ModalShell title={selectedSpace.title} onClose={() => setIsShowingDetail(false)}>
+          <div className="detail-sheet">
+            <button className="owner-row" onClick={() => setSelectedProfileId(selectedSpace.owner_id)}>
+              <div className="owner-avatar">{(profileById[selectedSpace.owner_id]?.planet_code ?? '??').slice(0, 2).toUpperCase()}</div>
+              <div className="owner-copy">
+                <div className="owner-name">
+                  {profileById[selectedSpace.owner_id]?.planet_code ?? selectedSpace.artist_name}
+                  {selectedSpace.owner_id === user.id ? <span className="owner-badge">时空主人</span> : null}
+                </div>
+                <small>创建于：{formatDate(selectedSpace.created_at)}</small>
+              </div>
+            </button>
+
+            <div className="topic-block">
+              <div className="topic-rule" />
+              <p>TA说： {selectedSpace.topic || selectedSpace.lyric_line || selectedSpace.title}</p>
+            </div>
+
+            <div className="list-stack">
+              <button className="list-row" onClick={() => setIsShowingVisits(true)}>
+                <div className="list-row-main">
+                  <span>累计来过</span>
+                  <small>{currentVisits.length}</small>
+                </div>
+                <span>›</span>
+              </button>
+
+              <button className="list-row" onClick={() => void handleLikeSpace()}>
+                <div className="list-row-main">
+                  <span>{likedByMe ? '喜欢过这个时空' : '喜欢这个时空'}</span>
+                  <small>{currentLikes.length}</small>
+                </div>
+                <span>{likedByMe ? '♥' : '♡'}</span>
+              </button>
+
+              <button className="list-row" onClick={() => setIsShowingComments(true)}>
+                <div className="list-row-main">
+                  <span>留言板</span>
+                  <small>{currentComments.length}</small>
+                </div>
+                <span>›</span>
+              </button>
+            </div>
+          </div>
+        </ModalShell>
+      ) : null}
+
+      {selectedSpace && isShowingVisits ? (
+        <ModalShell title="来过记录" onClose={() => setIsShowingVisits(false)}>
+          <div className="list-stack">
+            {currentVisits.map((visit) => {
+              const visitProfile = profileById[visit.user_id]
+              return (
+                <button key={visit.id} className="list-row" onClick={() => setSelectedProfileId(visit.user_id)}>
+                  <div className="list-row-main">
+                    <span>{visitProfile?.planet_code ?? '未知星球'}</span>
+                    <small>{formatMonthDay(visit.created_at)}</small>
+                  </div>
+                  <span>›</span>
+                </button>
+              )
+            })}
+            {!currentVisits.length ? <p className="empty-state">还没有来过记录。</p> : null}
+          </div>
+        </ModalShell>
+      ) : null}
+
+      {selectedSpace && isShowingComments ? (
+        <ModalShell title="留言板" onClose={() => setIsShowingComments(false)}>
+          <div className="modal-form">
+            <textarea className="field field-area" placeholder="写一句想留在这里的话" value={commentDraft} onChange={(event) => setCommentDraft(event.target.value)} />
+            <button className="primary-button" onClick={() => void postComment()}>发送留言</button>
+
+            <div className="list-stack">
+              {currentComments.map((comment) => (
+                <article key={comment.id} className="comment-card">
+                  <div className="comment-meta">
+                    <button
+                      className="text-button"
+                      onClick={() => setSelectedProfileId(comment.author_id)}
+                    >
+                      {comment.author_code}
+                    </button>
+                    <small>{formatMonthDay(comment.created_at)}</small>
+                  </div>
+                  <p>{comment.text || '图片留言'}</p>
+                  {comment.author_id === user.id ? (
+                    <button className="text-button danger-text" onClick={() => void deleteComment(comment.id)}>删除</button>
+                  ) : null}
+                </article>
+              ))}
+              {!currentComments.length ? <p className="empty-state">还没有留言。</p> : null}
+            </div>
+          </div>
+        </ModalShell>
+      ) : null}
+
+      {selectedProfile ? (
+        <ModalShell title={selectedProfile.planet_code} onClose={() => setSelectedProfileId(null)}>
+          <div className="profile-sheet">
+            <div className="owner-avatar large">{selectedProfile.planet_code.slice(0, 2).toUpperCase()}</div>
+            <div className="profile-meta">
+              <p>注册时间：{formatFullDate(selectedProfile.created_at)}</p>
+              <p>{selectedProfile.position_description}</p>
+              <p>{selectedProfile.tagline}</p>
+            </div>
+            {selectedProfile.id !== user.id ? (
+              <button className="primary-button" onClick={() => void openDirectConversation(selectedProfile.id)}>
+                私聊
+              </button>
+            ) : null}
+          </div>
+        </ModalShell>
+      ) : null}
+
+      {selectedDirectConversation ? (
+        <ModalShell
+          title={selectedDirectConversation.peer?.planet_code ?? '私聊'}
+          onClose={() => setSelectedDirectPeerId(null)}
+        >
+          <div className="direct-sheet">
+            <div className="list-stack direct-thread">
+              {selectedDirectConversation.rows.map((item) => {
+                const isMine = item.sender_id === user.id
+                return (
+                  <article
+                    key={item.id}
+                    className={`direct-message-row ${isMine ? 'mine' : 'theirs'}`}
+                  >
+                    <button
+                      className="sender-chip"
+                      onClick={() => setSelectedProfileId(isMine ? user.id : selectedDirectConversation.peerId)}
+                    >
+                      {isMine ? profile?.planet_code : (selectedDirectConversation.peer?.planet_code ?? '未知')}
+                    </button>
+                    <div className={`direct-bubble ${isMine ? 'mine' : 'theirs'}`}>
+                      {item.text || '图片/语音消息'}
+                    </div>
+                  </article>
+                )
+              })}
+            </div>
+
+            <div className="room-input modal-room-input">
+              <input
+                className="message-field"
+                placeholder="说点什么"
+                value={directDraft}
+                onChange={(event) => setDirectDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') void sendDirectText()
+                }}
+              />
+              <button className="send-button" disabled={sending} onClick={() => void sendDirectText()}>
+                发
+              </button>
+            </div>
+          </div>
+        </ModalShell>
+      ) : null}
+    </div>
+  )
+}
+
+function ModalShell({
+  title,
+  children,
+  onClose,
+}: {
+  title: string
+  children: ReactNode
+  onClose: () => void
+}) {
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <section className="modal-card" onClick={(event) => event.stopPropagation()}>
+        <header className="modal-header">
+          <h2>{title}</h2>
+          <button className="icon-button" onClick={onClose}>×</button>
+        </header>
+        <div className="modal-body">{children}</div>
+      </section>
     </div>
   )
 }
 
 function formatDate(value: string) {
   const date = new Date(value)
-  return `${String(date.getMonth() + 1).padStart(2, '0')}月${String(date.getDate()).padStart(2, '0')}日 ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+  return `${pad(date.getMonth() + 1)}月${pad(date.getDate())}日 ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
 function formatTime(value: string) {
   const date = new Date(value)
-  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
-const styles: Record<string, React.CSSProperties> = {
-  page: {
-    minHeight: '100vh',
-    background: '#fff',
-    color: '#3f3f46',
-    fontFamily: '-apple-system, BlinkMacSystemFont, sans-serif',
-  },
-  loginPage: {
-    minHeight: '100vh',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    background: '#fff',
-    fontFamily: '-apple-system, BlinkMacSystemFont, sans-serif',
-    padding: 24,
-  },
-  loginCard: {
-    width: '100%',
-    maxWidth: 360,
-  },
-  loginTitle: {
-    fontSize: 56,
-    margin: 0,
-    color: '#333',
-  },
-  loginSub: {
-    color: '#999',
-    marginBottom: 28,
-  },
-  loginInput: {
-    width: '100%',
-    height: 52,
-    boxSizing: 'border-box',
-    border: '1px solid #eee',
-    background: '#fafafa',
-    borderRadius: 16,
-    padding: '0 16px',
-    fontSize: 16,
-    marginBottom: 12,
-  },
-  blackButton: {
-    width: '100%',
-    height: 52,
-    border: 'none',
-    borderRadius: 16,
-    background: '#333',
-    color: '#fff',
-    fontSize: 16,
-    marginTop: 8,
-  },
-  whiteButton: {
-    width: '100%',
-    height: 52,
-    border: '1px solid #eee',
-    borderRadius: 16,
-    background: '#fff',
-    color: '#333',
-    fontSize: 16,
-    marginTop: 12,
-  },
-  homeHeader: {
-    height: 122,
-    display: 'flex',
-    alignItems: 'flex-end',
-    justifyContent: 'space-between',
-    padding: '0 42px 28px',
-    boxSizing: 'border-box',
-  },
-  homeIcon: {
-    border: 'none',
-    background: 'transparent',
-    fontSize: 34,
-    color: '#3f3f46',
-  },
-  homeRight: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 30,
-  },
-  searchIcon: {
-    border: 'none',
-    background: 'transparent',
-    fontSize: 48,
-    lineHeight: 1,
-    color: '#3f3f46',
-  },
-  profileCircle: {
-    width: 52,
-    height: 52,
-    borderRadius: '50%',
-    border: '4px solid #555',
-    background: '#fff',
-  },
-  grid: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(3, 1fr)',
-    borderTop: '1px solid #eee',
-    borderLeft: '1px solid #eee',
-  },
-  spaceCell: {
-    height: 150,
-    border: 'none',
-    borderRight: '1px solid #eee',
-    borderBottom: '1px solid #eee',
-    background: '#fff',
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  spaceTitle: {
-    fontSize: 15,
-    color: '#3f3f46',
-    marginBottom: 8,
-  },
-  spaceSub: {
-    fontSize: 13,
-    color: '#aaa',
-  },
-  addCell: {
-    height: 150,
-    border: 'none',
-    borderRight: '1px solid #eee',
-    borderBottom: '1px solid #eee',
-    background: '#fff',
-    fontSize: 42,
-    color: '#444',
-  },
-  logoutButton: {
-    position: 'fixed',
-    right: 16,
-    bottom: 16,
-    background: '#fff',
-    border: '1px solid #eee',
-    borderRadius: 999,
-    padding: '8px 14px',
-    color: '#999',
-  },
-  roomPage: {
-    minHeight: '100vh',
-    background: '#fff',
-    display: 'flex',
-    flexDirection: 'column',
-    color: '#3f3f46',
-    fontFamily: '-apple-system, BlinkMacSystemFont, sans-serif',
-  },
-  roomHeader: {
-    padding: '22px 20px 14px',
-  },
-  roomTitleRow: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 12,
-  },
-  roomTitle: {
-    fontSize: 36,
-    fontWeight: 400,
-    margin: 0,
-    flex: 1,
-    whiteSpace: 'nowrap',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-  },
-  roomActions: {
-    display: 'flex',
-    gap: 8,
-  },
-  roomIconButton: {
-    width: 44,
-    height: 44,
-    border: 'none',
-    background: 'transparent',
-    fontSize: 24,
-    color: '#3f3f46',
-  },
-  memberRow: {
-    display: 'flex',
-    alignItems: 'center',
-    marginTop: 28,
-  },
-  smallAvatar: {
-    width: 44,
-    height: 44,
-    borderRadius: '50%',
-    border: '1px solid #eee',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    color: '#777',
-    background: '#fff',
-  },
-  memberSpacer: {
-    flex: 1,
-  },
-  peoplePill: {
-    padding: '13px 24px',
-    borderRadius: 999,
-    background: '#f3f3f3',
-    color: '#777',
-    fontSize: 18,
-  },
-  divider: {
-    height: 1,
-    background: '#eee',
-  },
-  messageStream: {
-    flex: 1,
-    padding: '36px 20px 120px',
-    overflowY: 'auto',
-  },
-  systemMessage: {
-    textAlign: 'center',
-    color: '#aaa',
-    fontSize: 18,
-    marginBottom: 28,
-  },
-  timeText: {
-    fontSize: 13,
-    marginTop: 8,
-    color: '#bbb',
-  },
-  userMessage: {
-    textAlign: 'center',
-    marginBottom: 28,
-  },
-  senderCode: {
-    color: '#aaa',
-    fontSize: 14,
-    marginBottom: 8,
-  },
-  messageText: {
-    color: '#999',
-    fontSize: 18,
-    lineHeight: 1.5,
-  },
-  emptyRoom: {
-    textAlign: 'center',
-    color: '#aaa',
-    marginTop: 80,
-  },
-  inputBar: {
-    position: 'fixed',
-    left: 0,
-    right: 0,
-    bottom: 0,
-    background: '#fff',
-    display: 'flex',
-    alignItems: 'center',
-    gap: 12,
-    padding: '12px 18px 22px',
-    boxSizing: 'border-box',
-  },
-  emojiButton: {
-    width: 52,
-    height: 52,
-    borderRadius: '50%',
-    border: '3px solid #555',
-    background: '#fff',
-    fontSize: 24,
-  },
-  chatInput: {
-    flex: 1,
-    height: 54,
-    border: 'none',
-    borderRadius: 999,
-    background: '#f4f4f4',
-    padding: '0 20px',
-    fontSize: 16,
-    minWidth: 0,
-  },
-  voiceButton: {
-    flex: 1,
-    height: 54,
-    border: 'none',
-    borderRadius: 999,
-    background: '#f4f4f4',
-    color: '#aaa',
-    fontSize: 18,
-  },
-  roundButton: {
-    width: 52,
-    height: 52,
-    borderRadius: '50%',
-    border: '2px solid #ddd',
-    background: '#fff',
-    fontSize: 20,
-  },
-  sendMiniButton: {
-    width: 44,
-    height: 44,
-    borderRadius: '50%',
-    border: 'none',
-    background: '#333',
-    color: '#fff',
-  },
-  detailTop: {
-    height: 96,
-    display: 'flex',
-    alignItems: 'flex-end',
-    paddingLeft: 34,
-  },
-  backIcon: {
-    border: 'none',
-    background: 'transparent',
-    fontSize: 72,
-    color: '#3f3f46',
-  },
-  detailMain: {
-    padding: '34px 44px 70px',
-  },
-  detailTitle: {
-    fontSize: 56,
-    fontWeight: 400,
-    margin: '0 0 54px',
-    color: '#3f3f46',
-  },
-  ownerRow: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 22,
-    marginBottom: 48,
-  },
-  bigAvatar: {
-    width: 88,
-    height: 88,
-    borderRadius: '50%',
-    background: '#ead796',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    color: '#fff',
-    fontSize: 28,
-    fontWeight: 700,
-  },
-  ownerName: {
-    fontSize: 26,
-    color: '#999',
-  },
-  ownerBadge: {
-    fontSize: 16,
-    border: '1px solid #aaa',
-    borderRadius: 6,
-    padding: '4px 8px',
-    marginLeft: 12,
-  },
-  createdText: {
-    fontSize: 20,
-    color: '#aaa',
-    marginTop: 8,
-  },
-  topicBlock: {
-    display: 'flex',
-    gap: 24,
-  },
-  topicLine: {
-    width: 8,
-    background: '#f1f1f1',
-  },
-  topicText: {
-    fontSize: 30,
-    color: '#aaa',
-    lineHeight: 1.5,
-    margin: 0,
-  },
-  detailList: {
-    borderTop: '12px solid #f7f7f7',
-  },
-  listRow: {
-    height: 92,
-    display: 'grid',
-    gridTemplateColumns: '56px 1fr 50px 28px',
-    alignItems: 'center',
-    padding: '0 44px',
-    borderBottom: '1px solid #f2f2f2',
-  },
-  listIcon: {
-    fontSize: 30,
-    color: '#666',
-  },
-  heart: {
-    fontSize: 34,
-    color: '#28c29d',
-  },
-  listTitle: {
-    fontSize: 30,
-    color: '#3f3f46',
-  },
-  listValue: {
-    fontSize: 24,
-    color: '#aaa',
-    textAlign: 'right',
-  },
-  arrow: {
-    fontSize: 42,
-    color: '#aaa',
-    textAlign: 'right',
-  },
-  message: {
-    color: '#d44',
-    textAlign: 'center',
-    padding: 12,
-  },
+function formatMonthDay(value: string) {
+  const date = new Date(value)
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+function formatFullDate(value: string) {
+  const date = new Date(value)
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+function pad(value: number) {
+  return String(value).padStart(2, '0')
+}
+
+function daysSince(value: string) {
+  const start = new Date(value).getTime()
+  const diff = Date.now() - start
+  return Math.max(1, Math.floor(diff / 86_400_000) + 1)
 }
 
 export default App
