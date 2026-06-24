@@ -411,7 +411,7 @@ function App() {
 
     const { data, error } = await supabase
       .from('direct_messages')
-      .select('id, sender_id, receiver_id, sender_code, receiver_code, text, image_data, image_mime_type, audio_data, audio_mime_type, audio_duration_text, is_read, created_at')
+.select('id, sender_id, receiver_id, text, is_read, created_at')
       .or(`sender_id.eq.${user.id},receiver_id.eq.${user.id}`)
       .order('created_at', { ascending: true })
 
@@ -995,25 +995,28 @@ async function leaveCurrentSpace() {
   }
 
   async function sendDirectText() {
-    if (!user || !profile || !selectedDirectConversation) return
+  if (!user || !selectedDirectPeerId || !directDraft.trim()) return
 
-    const text = directDraft.trim()
+  const text = directDraft.trim()
+  setDirectDraft('')
+  setMessage('')
     if (!text) return
 
     setSending(true)
-    const { error } = await supabase.from('direct_messages').insert({
-      sender_id: user.id,
-      receiver_id: selectedDirectConversation.peerId,
-      sender_code: profile.planet_code,
-      receiver_code: selectedDirectConversation.peer?.planet_code ?? selectedDirectConversation.peerId,
-      text,
-      image_data: null,
-      image_mime_type: null,
-      audio_data: null,
-      audio_mime_type: null,
-      audio_duration_text: null,
-      is_read: false,
-    })
+    const profile = profileById[user.id]
+
+if (!profile?.planet_code) {
+  setMessage('发送私聊失败：当前用户资料缺少星球编号，请刷新后重试。')
+  return
+}
+
+const { error } = await supabase.from('direct_messages').insert({
+  sender_id: user.id,
+  receiver_id: selectedDirectPeerId,
+  sender_code: profile.planet_code,
+  text,
+  is_read: false,
+})
     setSending(false)
 
     if (error) {
