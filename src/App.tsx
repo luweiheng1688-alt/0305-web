@@ -44,13 +44,8 @@ type SpaceMessage = {
   space_id: string
   sender_id: string | null
   sender_code: string | null
-  kind: 'user' | 'system' | 'music' | 'audio'
+  kind: string
   text: string
-  image_data?: string | null
-  image_mime_type?: string | null
-  audio_data?: string | null
-  audio_mime_type?: string | null
-  audio_duration_text?: string | null
   created_at: string
 }
 
@@ -419,7 +414,7 @@ function App() {
 
     const { data, error } = await supabase
       .from('space_messages')
-      .select('id, space_id, sender_id, sender_code, kind, text, image_data, image_mime_type, audio_data, audio_mime_type, audio_duration_text, created_at')
+      .select('id, space_id, sender_id, sender_code, kind, text, created_at')
       .eq('space_id', spaceId)
       .order('created_at', { ascending: true })
 
@@ -441,9 +436,14 @@ function App() {
       .maybeSingle()
 
     if (error) {
-      setMessage(`读取个人资料失败：${error.message}`)
-      return null
-    }
+  const isNetworkError = error.message.includes('Failed to fetch')
+  setMessage(
+    isNetworkError
+      ? '网络不稳定：读取个人资料失败，请检查梯子/网络后刷新。'
+      : `读取个人资料失败：${error.message}`,
+  )
+  return null
+}
 
     if (existing) {
       setProfile(existing as Profile)
@@ -481,24 +481,23 @@ function App() {
   })
 
   const syncAll = useEffectEvent(async (authUser: User | null) => {
-    if (!authUser) return
-    const ensuredProfile = await ensureProfile(authUser)
-    if (!ensuredProfile) return
+  if (!authUser) return
 
-    await Promise.all([
-      loadProfiles(),
-      loadSpaces(),
-      loadSpaceMembers(),
-      loadSpaceLikes(),
-      loadSpaceVisits(),
-      loadSpaceComments(),
-      loadDirectMessages(),
-    ])
+  const ensuredProfile = await ensureProfile(authUser)
+  if (!ensuredProfile) return
 
-    if (selectedSpaceId) {
-      await loadMessages(selectedSpaceId)
-    }
-  })
+  // 启动时只加载最必要的数据，避免手机端同时请求太多表导致 Failed to fetch
+  await Promise.all([
+    loadProfiles(),
+    loadSpaces(),
+    loadSpaceMembers(),
+  ])
+
+  // 只有已经在某个时空里时，才加载该时空消息
+  if (selectedSpaceId) {
+    await loadMessages(selectedSpaceId)
+  }
+})
 
   useEffect(() => {
     let mounted = true
@@ -541,76 +540,64 @@ function App() {
       mounted = false
       listener.subscription.unsubscribe()
     }
-  }, [selectedSpaceId, syncAll])
+  }, [])
 
-  useEffect(() => {
-    const channels = [
-      supabase
-        .channel('profiles-sync')
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, () => {
-          void loadProfiles()
-        })
-        .subscribe(),
-      supabase
-        .channel('spaces-sync')
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'spaces' }, () => {
-          void loadSpaces()
-        })
-        .subscribe(),
-      supabase
-        .channel('space-members-sync')
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'space_members' }, () => {
-          void loadSpaceMembers()
-        })
-        .subscribe(),
-      supabase
-        .channel('space-likes-sync')
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'space_likes' }, () => {
-          void loadSpaceLikes()
-        })
-        .subscribe(),
-      supabase
-        .channel('space-visits-sync')
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'space_visits' }, () => {
-          void loadSpaceVisits()
-        })
-        .subscribe(),
-      supabase
-        .channel('space-comments-sync')
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'space_comments' }, () => {
-          void loadSpaceComments()
-        })
-        .subscribe(),
-      supabase
-        .channel('space-messages-sync')
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'space_messages' }, () => {
-          void loadMessages(selectedSpaceId)
-        })
-        .subscribe(),
-      supabase
-        .channel('direct-messages-sync')
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'direct_messages' }, () => {
-          void loadDirectMessages()
-        })
-        .subscribe(),
-    ]
-
-    return () => {
-      channels.forEach((channel) => {
-        void supabase.removeChannel(channel)
+  // 全局只保留最关键的实时同步：时空列表、在线成员、用户资料
+useEffect(() => {
+  const channels = [
+    supabase
+      .channel('profiles-sync')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, () => {
+        void loadProfiles()
       })
-    }
-  }, [
-    loadMessages,
-    loadDirectMessages,
-    loadProfiles,
-    loadSpaceComments,
-    loadSpaceLikes,
-    loadSpaceMembers,
-    loadSpaceVisits,
-    loadSpaces,
-    selectedSpaceId,
-  ])
+      .subscribe(),
+
+    supabase
+      .channel('spaces-sync')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'spaces' }, () => {
+        void loadSpaces()
+      })
+      .subscribe(),
+
+    supabase
+      .channel('space-members-sync')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'space_members' }, () => {
+        void loadSpaceMembers()
+      })
+      .subscribe(),
+  ]
+
+  return () => {
+    channels.forEach((channel) => {
+      void supabase.removeChannel(channel)
+    })
+  }
+}, [])
+
+// 只有进入某个时空后，才订阅这个时空的消息
+useEffect(() => {
+  if (!selectedSpaceId) return
+
+  const channel = supabase
+    .channel(`space-messages-sync-${selectedSpaceId}`)
+    .on(
+      'postgres_changes',
+      {
+        event: '*',
+        schema: 'public',
+        table: 'space_messages',
+        filter: `space_id=eq.${selectedSpaceId}`,
+      },
+      () => {
+        void loadMessages(selectedSpaceId)
+      },
+    )
+    .subscribe()
+
+  return () => {
+    void supabase.removeChannel(channel)
+  }
+}, [selectedSpaceId])
 
   useEffect(() => {
     if (!user || !selectedSpaceId) return
@@ -664,6 +651,17 @@ function App() {
     setMessage('')
     await loadMessages(space.id)
   }
+
+  async function openSpaceDetail() {
+  setIsShowingDetail(true)
+
+  // 详情页需要这些数据时再加载，不在首页启动时加载
+  await Promise.all([
+    loadSpaceLikes(),
+    loadSpaceVisits(),
+    loadSpaceComments(),
+  ])
+}
 
   async function handleCreateSpace() {
     if (!user || !profile) return
@@ -897,6 +895,11 @@ function App() {
     setSelectedSpaceId(null)
   }
 
+  async function openDirectList() {
+  setIsShowingDirectList(true)
+  await loadDirectMessages()
+}
+
   async function openDirectConversation(peerId: string) {
     setSelectedProfileId(null)
     setIsShowingDirectList(false)
@@ -999,7 +1002,7 @@ function App() {
               <h1>{selectedSpace.title}</h1>
               <div className="room-actions">
                 <button className="icon-button" onClick={() => setSelectedSpaceId(null)}>↘</button>
-                <button className="icon-button" onClick={() => setIsShowingDetail(true)}>•••</button>
+                <button className="icon-button" onClick={() => void openSpaceDetail()}>•••</button>
               </div>
             </div>
 
@@ -1087,7 +1090,7 @@ function App() {
             <button className="icon-button left-icon" onClick={() => setIsShowingProfile(true)}>◌</button>
             <div className="header-actions">
               <button className="icon-button" onClick={() => setIsShowingSearch(true)}>⌕</button>
-              <button className="icon-button badge-button" onClick={() => setIsShowingDirectList(true)}>
+              <button className="icon-button badge-button" onClick={() => void openDirectList()}>
                 私
                 {unreadDirectCount > 0 ? <span className="header-badge" /> : null}
               </button>
