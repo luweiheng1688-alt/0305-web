@@ -248,13 +248,32 @@ function App() {
           unreadCount,
         }
       })
-      .sort((left, right) => right.lastMessage.created_at.localeCompare(left.lastMessage.created_at))
+      .sort((left, right) =>
+  (right.lastMessage?.created_at ?? '').localeCompare(left.lastMessage?.created_at ?? ''),
+)
   }, [directMessages, profileById, user])
 
   const selectedDirectConversation = useMemo(() => {
-    if (!selectedDirectPeerId) return null
-    return directConversations.find((item) => item.peerId === selectedDirectPeerId) ?? null
-  }, [directConversations, selectedDirectPeerId])
+  if (!selectedDirectPeerId || !user) return null
+
+  const existingConversation = directConversations.find(
+    (item) => item.peerId === selectedDirectPeerId,
+  )
+
+  if (existingConversation) {
+    return existingConversation
+  }
+
+  const peer = profileById[selectedDirectPeerId] ?? null
+
+  return {
+    peerId: selectedDirectPeerId,
+    peer,
+    rows: [] as DirectMessage[],
+    lastMessage: null,
+    unreadCount: 0,
+  }
+}, [directConversations, profileById, selectedDirectPeerId, user])
 
   const visibleMessages = useMemo(() => {
     if (!roomOpenedAt) return messages
@@ -644,13 +663,58 @@ useEffect(() => {
     void markDirectMessagesRead(selectedDirectPeerId)
   }, [directMessages, selectedDirectPeerId])
 
-  async function openSpace(space: Space) {
-    setSelectedSpaceId(space.id)
-    setRoomOpenedAt(new Date().toISOString())
-    setIsShowingDetail(false)
-    setMessage('')
-    await loadMessages(space.id)
+async function leaveCurrentSpace() {
+  if (!user || !selectedSpaceId) {
+    setSelectedSpaceId(null)
+    setRoomOpenedAt(null)
+    setMessages([])
+    return
   }
+
+  const leavingSpaceId = selectedSpaceId
+
+  await supabase
+    .from('space_members')
+    .delete()
+    .eq('space_id', leavingSpaceId)
+    .eq('user_id', user.id)
+
+  setSpaceMembers((current) =>
+    current.filter(
+      (member) =>
+        !(member.space_id === leavingSpaceId && member.user_id === user.id),
+    ),
+  )
+
+  setSelectedSpaceId(null)
+  setRoomOpenedAt(null)
+  setMessages([])
+  setIsShowingDetail(false)
+  setMessage('')
+}
+
+  async function openSpace(space: Space) {
+  if (user && selectedSpaceId && selectedSpaceId !== space.id) {
+    await supabase
+      .from('space_members')
+      .delete()
+      .eq('space_id', selectedSpaceId)
+      .eq('user_id', user.id)
+
+    setSpaceMembers((current) =>
+      current.filter(
+        (member) =>
+          !(member.space_id === selectedSpaceId && member.user_id === user.id),
+      ),
+    )
+  }
+
+  setSelectedSpaceId(space.id)
+  setRoomOpenedAt(new Date().toISOString())
+  setIsShowingDetail(false)
+  setMessage('')
+  await loadMessages(space.id)
+}
 
   async function openSpaceDetail() {
   setIsShowingDetail(true)
@@ -1001,7 +1065,7 @@ useEffect(() => {
             <div className="room-title-row">
               <h1>{selectedSpace.title}</h1>
               <div className="room-actions">
-                <button className="icon-button" onClick={() => setSelectedSpaceId(null)}>↘</button>
+                <button className="icon-button" onClick={() => void leaveCurrentSpace()}>↘</button>
                 <button className="icon-button" onClick={() => void openSpaceDetail()}>•••</button>
               </div>
             </div>
